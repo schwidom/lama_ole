@@ -31,25 +31,25 @@ pip install ollama
 ### Basic Usage
 To send a simple prompt to a model:
 ```bash
-python lama_ole.py -m gemma2:2b -i "Explain the theory of relativity in one paragraph."
+python3 lama_ole.py -m gemma2:2b -i "Explain the theory of relativity in one paragraph."
 ```
 
 ### Using the "Thinking" Feature
 If you are using models that support a thinking process, use the `-t` flag to see the thought process in your terminal:
 ```bash
-python lama_ole.py -m gemma2:2b -t -i "Solve this complex math problem step by step."
+python3 lama_ole.py -m gemma2:2b -t -i "Solve this complex math problem step by step."
 ```
 
 ### Saving Outputs to Files
 You can save the model's thoughts and the final output to separate files automatically:
 ```bash
-python lama_ole.py -m gemma2:2b -i "Write a 500-word story about a robot" --thoughtfile thoughts.txt -o story.txt
+python3 lama_ole.py -m gemma2:2b -i "Write a 500-word story about a robot" --thoughtfile thoughts.txt -o story.txt
 ```
 
 ### Using Standard Input (Piping)
 Perfect for use in shell scripts or piping output from other commands:
 ```bash
-echo "Tell me a joke about programming." | python lama_ole.py --stdin -m lfm2.5:8b
+echo "Tell me a joke about programming." | python3 lama_ole.py --stdin -m lfm2.5:8b
 ```
 
 ## ⚙️ Configuration Options
