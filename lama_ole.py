@@ -9,7 +9,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="A CLI tool to interact with an Ollama instance."
     )
-
+    # Define arguments
+    parser.add_argument(
+        "-V", "--version",
+        action="version",
+        version="0.0.1"
+    )
     # Define arguments
     parser.add_argument(
         "--host",
@@ -20,8 +25,7 @@ def main():
     parser.add_argument(
         "-m", "--model",
         type=str,
-        required=True,
-        help="The model name to use (e.g., gemma2)"
+        help="The model name to use (e.g., gemma2:2b)"
     )
     parser.add_argument(
         "-i", "--input",
@@ -29,16 +33,21 @@ def main():
         help="The input string to send to the model"
     )
     parser.add_argument(
+        "-f", "--inputfile",
+        type=str,
+        help="Path to a file to be used as input"
+    )
+    parser.add_argument(
         "--stdin",
         action="store_true",
-        help="If set, read the input from standard input instead of --input"
+        help="If set, read the input from standard input instead of --input or --inputfile"
     )
     parser.add_argument(
         "-t", "--thinking",
         action="store_true",
         help="If set, output the model's thought process to the console"
     )
-    # New parameter for thoughts
+    # parameter for thoughts
     parser.add_argument(
         "--thoughtfile",
         type=str,
@@ -74,7 +83,7 @@ def main():
         help="Set the amount of GPU cores"
     )
 
-    # New parameter: keep_alive
+    # Parameter: keep_alive
     parser.add_argument(
         "--keep_alive",
         type=str,
@@ -82,18 +91,64 @@ def main():
         help="Keep model in memory (e.g., '5m', '1h' or a number of seconds)"
     )
 
+    # Parameter: list
+    parser.add_argument(
+        "-l", "--list",
+        action="store_true",
+        help="List all available models and exit"
+    )
+
+    # Parameter: list
+    parser.add_argument(
+        "--ps",
+        action="store_true",
+        help="List all running models and exit"
+    )
+
     args = parser.parse_args()
+
+    host_url = args.host
+    if not host_url.startswith(('http://', 'https://')) and ':' in host_url:
+        host_url = f"http://{host_url}"
+    client = Client(host=host_url)
+
+    if args.list:
+        print( "available models:")
+        response = client.list()
+        for model in response.models:
+            print(model)
+
+    if args.ps:
+        print( "running models:")
+        response = client.ps()
+        for model in response.models:
+            print(model)
+
+
+    if args.list or args.ps:
+     sys.exit(0)
+
+    if not args.model :
+        print( "Error: model has to be set (parameter -m , --model)", file=sys.stderr)
+        sys.exit(1)
 
     # Logic to determine the content of the message
     content = ""
-    if args.stdin:
+    if args.input:
+        content = args.input
+    elif args.inputfile:
+        if os.path.exists(args.inputfile):
+            with open(args.inputfile, 'r', encoding='utf-8') as f:
+                content = f.read()
+        else:
+            print(f"Error: The file '{args.inputfile}' was not found.", file=sys.stderr)
+            sys.exit(1)
+    elif args.stdin:
         # Read everything from stdin
         content = sys.stdin.read()
-    elif args.input:
-        content = args.input
     else:
-        # If neither stdin flag is set nor input string provided, show error
-        print("Error: You must provide content via -i or use --stdin", file=sys.stderr)
+        # If neither input, inputfile, nor stdin flag is set, show error
+        print("Error: You must provide content via -i, --inputfile, or use --stdin", file=sys.stderr)
         sys.exit(1)
 
     if not content.strip():
@@ -101,12 +156,6 @@ def main():
         sys.exit(1)
 
     # Initialize the Ollama client with the specified host
-    host_url = args.host
-    if not host_url.startswith(('http://', 'https://')) and ':' in host_url:
-        host_url = f"http://{host_url}"
-
-    client = Client(host=host_url)
-
     think_state = False
     
     # File handles
