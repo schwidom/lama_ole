@@ -5,6 +5,19 @@ import sys
 import os
 from ollama import Client
 
+# Ensure the script's directory is in sys.path for sibling imports
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+if _script_dir not in sys.path:
+    sys.path.insert(0, _script_dir)
+
+# Ensure the current working directory is in sys.path for user tool modules
+_cwd = os.getcwd()
+if _cwd not in sys.path:
+    sys.path.insert(0, _cwd)
+
+from tool_base import load_tools, to_ollama_tools, run_with_tools
+from chat import ChatState, run_chat
+
 def main():
     parser = argparse.ArgumentParser(
         description="A CLI tool to interact with an Ollama instance."
@@ -13,7 +26,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.1"
+        version="0.0.2"
     )
     # Define arguments
     parser.add_argument(
@@ -105,6 +118,38 @@ def main():
         help="List all running models and exit"
     )
 
+    # Parameter: verbose (repeatable for levels)
+    parser.add_argument(
+        "-v", "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity level (repeat: -v, -vv, -vvv)"
+    )
+
+    # Parameter: chat
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="Start an interactive chat REPL session"
+    )
+
+    # Parameter: safe
+    parser.add_argument(
+        "--safe",
+        action="store_true",
+        help="Enable user confirmation before dangerous tool operations"
+    )
+
+    # Parameter: tool (repeatable)
+    parser.add_argument(
+        "--tool",
+        type=str,
+        action="append",
+        dest="tools",
+        default=None,
+        help="Python module name providing tool functions (can be repeated)"
+    )
+
     args = parser.parse_args()
 
     host_url = args.host
@@ -132,7 +177,7 @@ def main():
         print( "Error: model has to be set (parameter -m , --model)", file=sys.stderr)
         sys.exit(1)
 
-    # Logic to determine the content of the message
+    # Determine initial content (optional in chat mode)
     content = ""
     if args.input:
         content = args.input
@@ -144,20 +189,24 @@ def main():
             print(f"Error: The file '{args.inputfile}' was not found.", file=sys.stderr)
             sys.exit(1)
     elif args.stdin:
-        # Read everything from stdin
         content = sys.stdin.read()
-    else:
-        # If neither input, inputfile, nor stdin flag is set, show error
+
+    if not args.chat and not content.strip():
         print("Error: You must provide content via -i, --inputfile, or use --stdin", file=sys.stderr)
         sys.exit(1)
 
-    if not content.strip():
-        print("Error: Input content is empty.", file=sys.stderr)
-        sys.exit(1)
+    # Load tools if --tool was specified
+    loaded_tools = []
+    if args.tools:
+        for module_name in args.tools:
+            try:
+                module_tools = load_tools(module_name)
+                loaded_tools.extend(module_tools)
+            except Exception as e:
+                print(f"Error loading tool module '{module_name}': {e}", file=sys.stderr)
+                sys.exit(1)
+    ollama_tools = to_ollama_tools(loaded_tools) if loaded_tools else None
 
-    # Initialize the Ollama client with the specified host
-    think_state = False
-    
     # File handles
     thought_file_handle = None
     output_file_handle = None
@@ -177,10 +226,7 @@ def main():
         output_file_handle = open(args.outfile, "w", encoding="utf-8")
 
     try:
-        # Use stream=True to ensure the connection is active and 
-        # a Ctrl-C will break the loop immediately.
-
-        options={
+        options = {
             "temperature": args.temperature,
         }
 
@@ -190,57 +236,60 @@ def main():
         if None != args.num_gpu:
             options["num_gpu"] = args.num_gpu
 
-        stream = client.chat(
-            model=args.model,
-            messages=[{'role': 'user', 'content': content}],
-            stream=True,
-            options=options,
-            keep_alive=args.keep_alive,
-        )
-
-        for chunk in stream:
-            # Handle Thinking logic
-            if hasattr(chunk.message, 'thinking') and chunk.message.thinking:
-                thought_text = chunk.message.thinking
-                
-                # 1. Logic for Console (controlled by -t)
-                if args.thinking:
-                    if not think_state:
-                        print("Thinking starts")
-                        think_state = True
-                    print(thought_text, end='', flush=True)
-                
-                # 2. Logic for File (independent of -t)
-                if args.thoughtfile and thought_file_handle:
-                    thought_file_handle.write(thought_text)
-                    thought_file_handle.flush()
-
-            # Handle Content logic
-            if hasattr(chunk.message, 'content') and chunk.message.content:
-                if think_state: 
-                    print()
-                    print("Thinking ends")
-                    print()
-                    think_state = False
-                
-                content_to_print = chunk.message.content
-                print(content_to_print, end='', flush=True)
-
-                # Logic for Output File (New functionality)
-                if args.outfile and output_file_handle:
-                    output_file_handle.write(content_to_print)
-                    output_file_handle.flush()
-
-        print() # New line at the end
+        if args.chat:
+            state = ChatState(
+                client=client,
+                model=args.model,
+                loaded_tools=loaded_tools,
+                ollama_tools=ollama_tools,
+                options=options,
+                keep_alive=args.keep_alive,
+                show_thinking=args.thinking,
+                verbose=args.verbose,
+                safe=args.safe,
+                thought_file_handle=thought_file_handle,
+                output_file_handle=output_file_handle,
+            )
+            if content.strip():
+                state.messages.append({"role": "user", "content": content})
+                run_with_tools(
+                    client=client,
+                    model=args.model,
+                    messages=state.messages,
+                    loaded_tools=loaded_tools,
+                    ollama_tools=ollama_tools,
+                    options=options,
+                    keep_alive=args.keep_alive,
+                    show_thinking=args.thinking,
+                    verbose=args.verbose,
+                    safe=args.safe,
+                    thought_file_handle=thought_file_handle,
+                    output_file_handle=output_file_handle,
+                )
+            run_chat(state)
+        else:
+            messages = [{"role": "user", "content": content}]
+            run_with_tools(
+                client=client,
+                model=args.model,
+                messages=messages,
+                loaded_tools=loaded_tools,
+                ollama_tools=ollama_tools,
+                options=options,
+                keep_alive=args.keep_alive,
+                show_thinking=args.thinking,
+                verbose=args.verbose,
+                safe=args.safe,
+                thought_file_handle=thought_file_handle,
+                output_file_handle=output_file_handle,
+            )
 
     except KeyboardInterrupt:
-        # Catching Ctrl-C specifically to exit gracefully
         sys.exit(0)
     except Exception as e:
         print(f"An error occurred: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        # Ensure the file handles are closed properly
         if thought_file_handle:
             thought_file_handle.close()
         if output_file_handle:
