@@ -109,7 +109,8 @@ def run_with_tools(
     safe=False,
     thought_file_handle=None,
     output_file_handle=None,
-    max_rounds=10,
+    max_tool_rounds=None,
+    max_tool_rounds_continuation="ask",
 ):
     tool_rounds = 0
     think_state = False
@@ -122,7 +123,54 @@ def run_with_tools(
     if verbose >= 2:
         _log_messages_payload(messages, file=sys.stderr)
 
-    while tool_rounds < max_rounds:
+    while True:
+        if max_tool_rounds is not None and tool_rounds >= max_tool_rounds:
+            if max_tool_rounds_continuation == "fallback":
+                print(
+                    "Reached maximum number of tool-calling rounds.",
+                    file=sys.stderr,
+                )
+                break
+            elif max_tool_rounds_continuation == "ask":
+                print(
+                    f"Maximum tool rounds ({max_tool_rounds}) reached.",
+                    file=sys.stderr,
+                )
+                print("Options:", file=sys.stderr)
+                print("  1. Set a new max round limit", file=sys.stderr)
+                print("  2. Set unlimited (continue indefinitely)", file=sys.stderr)
+                print("  3. Fallback (current mode default)", file=sys.stderr)
+                print("  4. Quit", file=sys.stderr)
+                print("Enter choice (1-4): ", file=sys.stderr, end='', flush=True)
+                try:
+                    choice = sys.stdin.readline().strip()
+                except EOFError:
+                    choice = "3"
+                if choice == "1":
+                    print(
+                        "Enter new max round limit: ",
+                        file=sys.stderr, end='', flush=True,
+                    )
+                    try:
+                        new_val = sys.stdin.readline().strip()
+                        max_tool_rounds = int(new_val)
+                        print(
+                            f"New limit set to {max_tool_rounds}.",
+                            file=sys.stderr,
+                        )
+                    except (ValueError, EOFError):
+                        print("Invalid input. Falling back.", file=sys.stderr)
+                        break
+                elif choice == "2":
+                    max_tool_rounds = None
+                    print("Unlimited rounds set.", file=sys.stderr)
+                elif choice == "4":
+                    print("Exiting.", file=sys.stderr)
+                    return final_response
+                else:
+                    break
+                continue
+
         if verbose >= 2:
             _log_messages_payload(messages, file=sys.stderr)
 
@@ -279,9 +327,6 @@ def run_with_tools(
             messages.append({"role": "assistant", "content": response_content})
             final_response = response_content
             break
-
-    if tool_rounds >= max_rounds:
-        print("Reached maximum number of tool-calling rounds.", file=sys.stderr)
 
     return final_response
 

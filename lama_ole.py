@@ -26,7 +26,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.2"
+        version="0.0.3"
     )
     # Define arguments
     parser.add_argument(
@@ -150,6 +150,23 @@ def main():
         help="Python module name providing tool functions (can be repeated)"
     )
 
+    # Parameter: max_tool_rounds
+    parser.add_argument(
+        "--max_tool_rounds",
+        type=int,
+        default=None,
+        help="Maximum number of tool-calling rounds (default: no limit)"
+    )
+
+    # Parameter: max_tool_rounds_continuation
+    parser.add_argument(
+        "--max_tool_rounds_continuation",
+        type=str,
+        default="ask",
+        choices=["ask", "fallback"],
+        help="Behavior when max_tool_rounds is reached: 'ask' (interactive menu) or 'fallback' (silent default)"
+    )
+
     args = parser.parse_args()
 
     host_url = args.host
@@ -249,6 +266,8 @@ def main():
                 safe=args.safe,
                 thought_file_handle=thought_file_handle,
                 output_file_handle=output_file_handle,
+                max_tool_rounds=args.max_tool_rounds,
+                max_tool_rounds_continuation=args.max_tool_rounds_continuation,
             )
             if content.strip():
                 state.messages.append({"role": "user", "content": content})
@@ -265,6 +284,8 @@ def main():
                     safe=args.safe,
                     thought_file_handle=thought_file_handle,
                     output_file_handle=output_file_handle,
+                    max_tool_rounds=args.max_tool_rounds,
+                    max_tool_rounds_continuation=args.max_tool_rounds_continuation,
                 )
             run_chat(state)
         else:
@@ -282,6 +303,8 @@ def main():
                 safe=args.safe,
                 thought_file_handle=thought_file_handle,
                 output_file_handle=output_file_handle,
+                max_tool_rounds=args.max_tool_rounds,
+                max_tool_rounds_continuation=args.max_tool_rounds_continuation,
             )
 
     except KeyboardInterrupt:

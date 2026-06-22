@@ -174,6 +174,8 @@ In chat mode (`--chat`), lines starting with `/` are interpreted as commands:
 | `--chat` | Start an interactive chat REPL session | |
 | `--tool MODULE` | Load tool module (can be repeated) | `tools.example_tools` |
 | `--safe` | Enable user confirmation before dangerous tool operations | |
+| `--max_tool_rounds` | Maximum tool-calling rounds before continuation prompt (default: no limit) | `10` |
+| `--max_tool_rounds_continuation` | Behavior when limit reached: `ask` (interactive menu) or `fallback` (silent) | `ask` |
 | `-v, --verbose` | Increase verbosity level (repeat: `-v`, `-vv`, `-vvv`) | `-vv` |
 
 ## 📢 Verbosity Levels
