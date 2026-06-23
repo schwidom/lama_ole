@@ -1,94 +1,264 @@
 ***
 
-# 🚀 lama_ole
+# lama_ole
 
-A powerful, feature-rich CLI tool designed to interact with **Ollama** instances.
-`lama_ole` provides streaming chat, tool calling, thinking-process handling, and
-flexible output options.
+A CLI tool to interact with **Ollama** instances. Supports streaming chat, tool
+calling, thinking-process handling, media understanding (image/video/audio), and
+flexible input/output options.
 
-## ✨ Features
+## Features
 
-- **Streaming Support:** Real-time output as the model generates text.
-- **Thinking Process Handling:**
-  - Display the model's internal thought process in the console (`-t`).
-  - Save thoughts to a dedicated file independently of the console output (`--thoughtfile`).
-- **Output Redirection:** Save the final generated content directly to a file (`-o`).
-- **Flexible Input:** Direct string input via `-i`, file input via `-f`, or standard
-  input via `--stdin`.
-- **Chat Mode:** Interactive multi-turn REPL with slash commands (`--chat`).
-- **Tool Calling:** Load Python modules as callable tools that the model can invoke
-  automatically (`--tool`).
-- **Model Listing:** List available or running models (`-l`, `--ps`).
-- **Full Ollama Integration:** Pass through parameters like `temperature`, `num_ctx`,
-  `num_gpu`, and `keep_alive`.
+- **Streaming Support** — Real-time output as the model generates text.
+- **Thinking Process** — Display or save the model's internal thought process
+  (`-t`, `--thoughtfile`).
+- **Output Redirection** — Save generated content to a file (`-o`).
+- **Flexible Input** — Direct string (`-i`), file (`-f`), or stdin (`--stdin`).
+- **Chat Mode** — Multi-turn REPL with slash commands (`--chat`).
+- **Tool Calling** — Load Python modules as callable tools (`--tool`).
+- **Tool Documentation** — Inspect loaded tools, their signatures, and
+  environment variables (`--help-tools`).
+- **Media Understanding** — Image description/OCR, video frame analysis, audio
+  transcription via bundled `tools.media_understanding_tools`.
+- **Model Listing** — List available or running models (`-l`, `--ps`).
+- **Ollama Options** — Pass through `temperature`, `num_ctx`, `num_gpu`,
+  `keep_alive`.
 
-## 📋 Prerequisites
+## Prerequisites
 
-Before running the tool, ensure you have:
-1. **Ollama** installed and running on your machine ([ollama.com](https://ollama.com)).
-2. **Python 3.9+** installed.
-3. The `ollama` Python library installed.
+1. **Ollama** installed and running ([ollama.com](https://ollama.com)).
+2. **Python 3.9+**.
+3. The `ollama` Python library.
 
 ### Installation
+
 ```bash
 pip install ollama
 ```
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Basic Usage
-To send a simple prompt to a model:
+
 ```bash
-python3 lama_ole.py -m gemma2:2b -i "Explain the theory of relativity in one paragraph."
+python3 lama_ole.py -m gemma2:2b -i "Explain the theory of relativity."
 ```
 
-### Using the "Thinking" Feature
-If you are using models that support a thinking process, use the `-t` flag to see the
-thought process in your terminal:
+### Thinking Feature
+
 ```bash
-python3 lama_ole.py -m gemma2:2b -t -i "Solve this complex math problem step by step."
+python3 lama_ole.py -m gemma2:2b -t -i "Solve a complex math problem step by step."
 ```
 
-### Saving Outputs to Files
-You can save the model's thoughts and the final output to separate files automatically:
+### Saving Outputs
+
 ```bash
-python3 lama_ole.py -m gemma2:2b -i "Write a 500-word story about a robot" \
+python3 lama_ole.py -m gemma2:2b -i "Write a story" \
     --thoughtfile thoughts.txt -o story.txt
 ```
 
-### Using Standard Input (Piping)
-Perfect for use in shell scripts or piping output from other commands:
+### Piping Input
+
 ```bash
-echo "Tell me a joke about programming." | python3 lama_ole.py --stdin -m lfm2.5:8b
+echo "Tell me a joke." | python3 lama_ole.py --stdin -m llama3.2:3b
 ```
 
 ### Chat Mode
-Start an interactive multi-turn conversation:
+
 ```bash
-python3 lama_ole.py --chat -m llama3:2b
+python3 lama_ole.py --chat -m llama3.2:3b
 ```
 
-Optionally provide an initial message:
+With an initial system message:
+
 ```bash
-python3 lama_ole.py --chat -m llama3:2b -i "You are a helpful assistant."
+python3 lama_ole.py --chat -m llama3.2:3b -i "You are a helpful assistant."
 ```
 
-### Tool Calling (Single-Shot)
-Load tool modules and let the model invoke them:
+## Tool Calling
+
+### Basic Tool Usage
+
+Load one or more tool modules. The LLM can then invoke them automatically.
+
 ```bash
-python3 lama_ole.py -m llama3:2b -i "What's the weather in Paris?" \
+python3 lama_ole.py -m llama3.2:3b -i "What's the weather in Paris?" \
     --tool tools.example_tools
 ```
 
 ### Chat Mode with Tools
-Combine chat and tools for an interactive agent session:
+
 ```bash
-python3 lama_ole.py --chat -m llama3:2b --tool tools.example_tools
+python3 lama_ole.py --chat -m llama3.2:3b --tool tools.example_tools
 ```
 
-## 🛠 Writing Custom Tools
+### Inspecting Tools
 
-Tools are Python functions decorated with `@tool`. Create a `.py` file:
+Use `--help-tools` to see all loaded tools, their signatures, and which
+environment variables they read:
+
+```bash
+python3 lama_ole.py --help-tools --tool tools.media_understanding_tools
+```
+
+Output:
+
+```
+Tool Module: tools.media_understanding_tools
+  Environment Variables:
+    LAMA_OLE_VISION_HOST: Ollama host for vision/audio models (defaults to --host value)
+  Functions:
+    image_describe(path: string, [model: string]) — Describe the contents of an image using a vision model
+    image_ask(path: string, question: string, [model: string]) — Ask a specific question about an image
+    image_ocr(path: string, [lang: string]) — Extract text from an image using OCR (requires tesseract)
+    video_describe(path: string, [interval: number], [model: string]) — Describe a video by extracting frames
+    video_scene_changes(path: string, [threshold: number]) — Detect scene changes with ffmpeg
+    video_transcribe(path: string, [model: string]) — Extract audio and transcribe with Whisper
+    video_ask(path: string, question: string, [interval: number], [model: string]) — Ask about a video
+    audio_transcribe(path: string, [model: string]) — Transcribe speech with Whisper
+    audio_ask(path: string, question: string, [model: string]) — Transcribe and answer a question
+    list_vision_models() — List available vision models configured via --vision_model
+```
+
+### Multiple Tool Modules
+
+```bash
+python3 lama_ole.py --chat -m llama3.2:3b \
+    --tool tools.example_tools \
+    --tool tools.media_understanding_tools \
+    --tool tools.web_tools
+```
+
+## Media Understanding Tools
+
+The bundled `tools.media_understanding_tools` module provides image, video, and
+audio comprehension via Ollama vision models, Whisper transcription, and OCR.
+
+### Vision Models
+
+Specify which vision models the tools should use with `--vision_model`
+(repeatable). The first model is the default when the LLM doesn't pick one.
+
+```bash
+python3 lama_ole.py --chat -m llama3.2:3b \
+    --tool tools.media_understanding_tools \
+    --vision_model gemma3:12b --vision_model llava:13b
+```
+
+The LLM can call `list_vision_models()` to see which models are available, then
+choose one by passing `model="gemma3:12b"` to any vision tool.
+
+### Image Tools
+
+| Tool | Description |
+|------|-------------|
+| `image_describe(path, [model])` | Describe image contents in detail |
+| `image_ask(path, question, [model])` | Ask a specific question about an image |
+| `image_ocr(path, [lang])` | Extract text via tesseract (default `eng`) |
+
+### Video Tools
+
+| Tool | Description |
+|------|-------------|
+| `video_describe(path, [interval], [model])` | Extract frames every `interval` seconds and describe each |
+| `video_scene_changes(path, [threshold])` | Detect scene cuts with ffmpeg |
+| `video_transcribe(path, [model])` | Extract audio and transcribe with Whisper |
+| `video_ask(path, question, [interval], [model])` | Transcribe audio + analyze a mid-video frame |
+
+### Audio Tools
+
+| Tool | Description |
+|------|-------------|
+| `audio_transcribe(path, [model])` | Transcribe speech via Whisper |
+| `audio_ask(path, question, [model])` | Transcribe and answer a question |
+
+### Examples
+
+```bash
+# Describe an image
+python3 lama_ole.py -m llama3.2:3b -i "Describe this image" \
+    --tool tools.media_understanding_tools \
+    --vision_model llava-phi3:3.8b
+
+# Ask about a video
+python3 lama_ole.py -m llama3.2:3b -i "What objects are in this video?" \
+    --tool tools.media_understanding_tools
+
+# Transcribe audio
+python3 lama_ole.py -m llama3.2:3b -i "Transcribe this recording" \
+    --tool tools.media_understanding_tools
+```
+
+## Bundled Tool Modules
+
+| Module | Description | Tools |
+|--------|-------------|-------|
+| `tools.example_tools` | Example/reference tools | `get_weather`, `calculate`, `read_file` |
+| `tools.media_understanding_tools` | Image, video, audio comprehension | `image_describe`, `image_ask`, `image_ocr`, `video_describe`, `video_scene_changes`, `video_transcribe`, `video_ask`, `audio_transcribe`, `audio_ask`, `list_vision_models` |
+| `tools.dev_tools` | Development (filesystem, code, git) | `run_command`, `read_file`, `write_file`, `glob`, `grep`, `git_status`, etc. |
+| `tools.dev_tools_safer` | Safer subset of dev tools | (limited operations) |
+| `tools.web_tools` | Internet access | `web_fetch`, `web_search` |
+| `tools.image_tools` | Basic image operations | image format conversion, resizing |
+| `tools.video_tools` | Basic video operations | video format conversion, trimming |
+| `tools.audio_tools` | Basic audio operations | audio format conversion |
+| `tools.read_base64` | Base64 decoding | decode base64 strings |
+
+## Chat Commands
+
+In chat mode (`--chat`), lines starting with `/` are commands:
+
+| Command | Description |
+|---------|-------------|
+| `/feed <path>` | Read a file and send its content as a message |
+| `/clear` | Clear the conversation history |
+| `/model <name>` | Switch to a different model |
+| `/save <path>` | Save the conversation to a JSON file |
+| `/load <path>` | Load a conversation from a JSON file |
+| `/tools` | List loaded tools |
+| `/context` | Show message count and total character count |
+| `/help` | Show this help message |
+| `/exit`, `/quit` | Exit the chat |
+
+## Configuration Options
+
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `-h, --help` | Show help message and exit | |
+| `-V, --version` | Show program version and exit | |
+| `--host HOST` | Ollama instance host | `http://localhost:11434` |
+| `-m, --model MODEL` | Model name to use | (required) |
+| `-i, --input TEXT` | Input string for the model | |
+| `-f, --inputfile PATH` | Read input from a file | |
+| `--stdin` | Read input from standard input | |
+| `-o, --outfile PATH` | Save main output to file | |
+| `-t, --thinking` | Show model's thought process | |
+| `--thoughtfile PATH` | Save thoughts to file (independent of `-t`) | |
+| `--temperature FLOAT` | Sampling temperature | `0.0` |
+| `--num_ctx INT` | Context window size | (Ollama default) |
+| `--num_gpu INT` | GPU layers to use | (Ollama default) |
+| `--keep_alive DURATION` | Keep model in memory (`5m`, `1h`) | (Ollama default) |
+| `--chat` | Start interactive chat REPL | |
+| `--tool MODULE` | Load tool module (repeatable) | |
+| `--vision_model MODEL` | Vision model for media tools (repeatable) | (auto-detect) |
+| `--help-tools` | Show loaded tool documentation and exit | |
+| `--safe` | Confirm before dangerous tool operations | |
+| `--max_tool_rounds N` | Max tool-calling rounds | (no limit) |
+| `--max_tool_rounds_continuation` | Behavior at limit: `ask` or `fallback` | `ask` |
+| `-l, --list` | List all available models | |
+| `--ps` | List all running models | |
+| `-v` to `-vvv` | Verbosity level (repeat for more) | silent |
+
+### Verbosity Levels
+
+| Level | Output |
+|-------|--------|
+| (default) | Silent — no debug output |
+| `-v` | Tool call names + truncated results (500 chars) |
+| `-vv` | Full tool results + messages payload before API calls |
+| `-vvv` | Raw streaming chunks as they arrive |
+
+## Writing Custom Tools
+
+Tools are Python functions decorated with `@tool` from `tool_base`:
 
 ```python
 from tool_base import tool
@@ -101,12 +271,11 @@ def multiply(a: int, b: int) -> int:
 
 @tool(description="Get the population of a city")
 def get_population(city: str) -> str:
-    # Replace with real lookup
     return f"Population of {city}: 2.5 million"
 ```
 
-Parameter names and types are automatically inferred from function annotations.
-Alternatively, pass explicit `params`:
+Parameter types are inferred from annotations. For complex schemas, pass
+explicit `params`:
 
 ```python
 @tool(
@@ -123,85 +292,47 @@ def web_search(query: str) -> str:
     ...
 ```
 
-Load your tool module:
+Load your module:
+
 ```bash
-python3 lama_ole.py -m llama3:2b -i "search for python tutorials" --tool mytools
+python3 lama_ole.py -m llama3.2:3b -i "search for python tutorials" --tool mytools
 ```
 
-### Bundled Example Tools
+### Documenting Environment Variables
 
-The project ships with `tools.example_tools`:
-- `get_weather(city)` — returns a fake weather report
-- `calculate(expression)` — evaluates a math expression safely
-- `read_file(path)` — reads a text file from disk
+Tools that read environment variables should define a module-level
+`__tool_env__` dict. These are displayed by `--help-tools`:
 
-## 💬 Chat Commands
+```python
+__tool_env__ = {
+    "MY_API_KEY": "API key for external service",
+}
+```
 
-In chat mode (`--chat`), lines starting with `/` are interpreted as commands:
+## Environment Variables
 
-| Command | Description |
-|---------|-------------|
-| `/feed <path>` | Read a file and send its content as a message |
-| `/clear` | Clear the conversation history |
-| `/model <name>` | Switch to a different model |
-| `/save <path>` | Save the conversation to a JSON file |
-| `/load <path>` | Load a conversation from a JSON file |
-| `/tools` | List loaded tools |
-| `/context` | Show message count and total characters |
-| `/help` | Show this help message |
-| `/exit`, `/quit` | Exit the chat |
-
-## ⚙️ Configuration Options
-
-| Flag | Description | Example |
+| Variable | Default | Description |
 | :--- | :--- | :--- |
-| `-h, --help` | Show this help message and exit | |
-| `-V, --version` | Show program version and exit | |
-| `--host HOST` | The host of the ollama instance | `localhost:11434` |
-| `-m, --model` | The model name to use | `gemma4:12b`, `qwen3.5:4b` |
-| `-i, --input` | The input string to send to the model | `"Hello world"` |
-| `-f, --inputfile` | Path to a file to use as input | `prompt.txt` |
-| `--stdin` | Read input from standard input | |
-| `-t, --thinking` | Output the model's thought process to console | |
-| `--thoughtfile` | Path to save thoughts (independent of `-t`) | `thoughts.txt` |
-| `-o, --outfile` | Path where main output should be saved | `output.txt` |
-| `--temperature` | Set sampling temperature (0.0 - 1.0) | `0.7` |
-| `--num_ctx` | Set the context window size | `8192` |
-| `--num_gpu` | Set the number of GPU cores to use | `4` |
-| `--keep_alive` | Keep model in memory (e.g., `'5m'`, `'1h'`) | `30m` |
-| `-l, --list` | List all available models | |
-| `--ps` | List all running models | |
-| `--chat` | Start an interactive chat REPL session | |
-| `--tool MODULE` | Load tool module (can be repeated) | `tools.example_tools` |
-| `--safe` | Enable user confirmation before dangerous tool operations | |
-| `--max_tool_rounds` | Maximum tool-calling rounds before continuation prompt (default: no limit) | `10` |
-| `--max_tool_rounds_continuation` | Behavior when limit reached: `ask` (interactive menu) or `fallback` (silent) | `ask` |
-| `-v, --verbose` | Increase verbosity level (repeat: `-v`, `-vv`, `-vvv`) | `-vv` |
+| `LAMA_OLE_VISION_HOST` | `--host` value | Ollama host used by media understanding tools. Overrides `--host` for vision/audio model calls. |
 
-## 📢 Verbosity Levels
+## Troubleshooting
 
-Repeat `-v` to increase output detail to stderr:
-
-| Level | Flag | Output |
-|-------|------|--------|
-| 0 | (default) | Silent — no debug output |
-| 1 | `-v` | Tool call names + truncated results (500 chars) |
-| 2 | `-vv` | Full tool results + messages payload before each API call |
-| 3 | `-vvv` | Raw streaming chunks as they arrive from the model |
-
-## 🛠 Troubleshooting
-
-- **Connection Error:** Ensure Ollama is running and the `--host` matches your local
-  setup (default is `http://localhost:11434`).
-- **File Errors:** The script will exit if you attempt to create a file that already
-  exists to prevent overwriting data.
-- **Missing Library:** If `ollama` module is not found, run `pip install ollama`.
-- **Tool not found:** Use dotted module names, not file paths. For example,
+- **Connection Error** — Ensure Ollama is running and `--host` matches your
+  setup (default `http://localhost:11434`).
+- **File Exists Error** — The script refuses to overwrite existing files.
+  Remove the target file first or use a different path.
+- **Missing Library** — Run `pip install ollama`. For media tools, also
+  `pip install Pillow`.
+- **Tool not found** — Use dotted module names, not file paths:
   `--tool tools.example_tools` (not `--tool tools/example_tools.py`).
-- **Chat errors:** Model errors in chat mode are caught gracefully and printed
-  without exiting the REPL.
+- **Media: no vision model found** — Use `--vision_model MODEL` to specify
+  which installed Ollama models are vision-capable. Run `--help-tools` with
+  your tool module to verify configuration.
+- **Chat errors** — Model errors in chat mode are caught gracefully and
+  printed without exiting the REPL.
 
-## 📄 License
+## License
+
 This project is open-source and available under the
 
 [Apache License Version 2.0, January 2004](http://www.apache.org/licenses/).

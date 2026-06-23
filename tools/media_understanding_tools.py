@@ -7,7 +7,12 @@ import shutil
 import subprocess
 import tempfile
 
-from tool_base import tool
+from tool_base import get_ollama_host, get_vision_models, tool
+
+
+__tool_env__ = {
+    "LAMA_OLE_VISION_HOST": "Ollama host for vision/audio models (defaults to --host value)",
+}
 
 try:
     from ollama import Client as OllamaClient
@@ -30,7 +35,7 @@ _WHISPER_CANDIDATES = ["whisper", "faster-whisper"]
 
 
 def _ollama_host():
-    return os.environ.get("LAMA_OLE_HOST", "http://localhost:11434")
+    return os.environ.get("LAMA_OLE_VISION_HOST") or get_ollama_host()
 
 
 def _ollama_client():
@@ -89,7 +94,11 @@ def _ollama_vision(prompt, path, model=""):
         return f"Error: file not found: {path}"
     try:
         client = _ollama_client()
-        resolved_model = model or _find_model(client, _VISION_CANDIDATES, "llava")
+        user_models = get_vision_models()
+        if user_models:
+            resolved_model = model or _find_model(client, user_models, user_models[0])
+        else:
+            resolved_model = model or _find_model(client, _VISION_CANDIDATES, "llava")
         b64 = _image_to_base64(path)
         resp = client.chat(
             model=resolved_model,
@@ -187,7 +196,11 @@ def video_describe(path: str, interval: float = 5, model: str = "") -> str:
     with tempfile.TemporaryDirectory() as tmp:
         try:
             client = _ollama_client()
-            resolved_model = model or _find_model(client, _VISION_CANDIDATES, "llava")
+            user_models = get_vision_models()
+            if user_models:
+                resolved_model = model or _find_model(client, user_models, user_models[0])
+            else:
+                resolved_model = model or _find_model(client, _VISION_CANDIDATES, "llava")
             probe = subprocess.run(
                 [_FFPROBE, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path],
                 capture_output=True, text=True, timeout=30,
@@ -317,7 +330,11 @@ def video_ask(path: str, question: str, interval: float = 10, model: str = "") -
             transcript = "(could not extract audio)"
         try:
             client = _ollama_client()
-            resolved_model = model or _find_model(client, _VISION_CANDIDATES, "llava")
+            user_models = get_vision_models()
+            if user_models:
+                resolved_model = model or _find_model(client, user_models, user_models[0])
+            else:
+                resolved_model = model or _find_model(client, _VISION_CANDIDATES, "llava")
             subprocess.run(
                 [_FFMPEG, "-i", path, "-vf", f"fps=1/{interval}", os.path.join(tmp, "frame_%04d.jpg")],
                 capture_output=True, text=True, timeout=300,
@@ -355,7 +372,11 @@ def audio_ask(path: str, question: str, model: str = "") -> str:
         return _no_ollama()
     try:
         client = _ollama_client()
-        resolved_model = model or _find_model(client, _VISION_CANDIDATES, "llava")
+        user_models = get_vision_models()
+        if user_models:
+            resolved_model = model or _find_model(client, user_models, user_models[0])
+        else:
+            resolved_model = model or _find_model(client, _VISION_CANDIDATES, "llava")
         resp = client.chat(
             model=resolved_model,
             messages=[{
@@ -366,3 +387,20 @@ def audio_ask(path: str, question: str, model: str = "") -> str:
         return resp.message.content
     except Exception as e:
         return f"{transcript}\n\n(Error answering question: {e})"
+
+
+# ---------------------------------------------------------------------------
+# Model listing
+# ---------------------------------------------------------------------------
+
+
+@tool(description="List all available vision models configured via --vision_model for media understanding tools")
+def list_vision_models() -> str:
+    models = get_vision_models()
+    if not models:
+        return (
+            "No vision models explicitly configured (--vision_model). "
+            "The system will auto-detect from installed Ollama models "
+            f"using built-in candidates: {_VISION_CANDIDATES}"
+        )
+    return "Available vision models:\n" + "\n".join(f"  - {m}" for m in models)

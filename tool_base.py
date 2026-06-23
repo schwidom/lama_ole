@@ -18,6 +18,32 @@ SAFETY_SYSTEM_PROMPT = (
     "reasoning."
 )
 
+# Vision models configured via CLI --vision_model (populated at startup)
+_VISION_MODELS: list[str] = []
+
+
+def set_vision_models(models: list[str]):
+    _VISION_MODELS.clear()
+    _VISION_MODELS.extend(models)
+
+
+def get_vision_models() -> list[str]:
+    return list(_VISION_MODELS)
+
+
+# Ollama host configured via CLI --host (fallback for tools)
+_OLLAMA_HOST = "http://localhost:11434"
+
+
+def set_ollama_host(host: str):
+    global _OLLAMA_HOST
+    _OLLAMA_HOST = host
+
+
+def get_ollama_host() -> str:
+    return _OLLAMA_HOST
+
+
 DANGEROUS_TOOLS = {
     "run_command", "write_file", "append_file", "replace_in_file",
     "delete_file",
@@ -36,6 +62,20 @@ class Tool:
 
 
 _TOOL_REGISTRY: list[Tool] = []
+
+
+@dataclass
+class ToolModuleInfo:
+    module_name: str
+    tools: list[Tool]
+    env_vars: dict[str, str]
+
+
+_TOOL_MODULES: list[ToolModuleInfo] = []
+
+
+def get_tool_modules_info() -> list[ToolModuleInfo]:
+    return list(_TOOL_MODULES)
 
 
 def tool(description: str = "", params: Optional[dict] = None):
@@ -93,6 +133,12 @@ def load_tools(module_name: str) -> list[Tool]:
     for obj in vars(mod).values():
         if isinstance(obj, Tool):
             tools.append(obj)
+    env_vars = getattr(mod, "__tool_env__", {})
+    _TOOL_MODULES.append(ToolModuleInfo(
+        module_name=module_name,
+        tools=list(tools),
+        env_vars=dict(env_vars),
+    ))
     return tools
 
 

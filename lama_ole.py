@@ -15,7 +15,14 @@ _cwd = os.getcwd()
 if _cwd not in sys.path:
     sys.path.insert(0, _cwd)
 
-from tool_base import load_tools, to_ollama_tools, run_with_tools
+from tool_base import (
+    get_tool_modules_info,
+    load_tools,
+    set_ollama_host,
+    set_vision_models,
+    to_ollama_tools,
+    run_with_tools,
+)
 from chat import ChatState, run_chat
 
 def main():
@@ -26,7 +33,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.5"
+        version="0.0.6"
     )
     # Define arguments
     parser.add_argument(
@@ -158,6 +165,23 @@ def main():
         help="Maximum number of tool-calling rounds (default: no limit)"
     )
 
+    # Parameter: vision_model (repeatable)
+    parser.add_argument(
+        "--vision_model",
+        type=str,
+        action="append",
+        dest="vision_models",
+        default=None,
+        help="Vision model name available for media understanding tools (can be repeated)"
+    )
+
+    # Parameter: help-tools
+    parser.add_argument(
+        "--help-tools",
+        action="store_true",
+        help="Show documentation for loaded tool modules and exit"
+    )
+
     # Parameter: max_tool_rounds_continuation
     parser.add_argument(
         "--max_tool_rounds_continuation",
@@ -174,6 +198,11 @@ def main():
         host_url = f"http://{host_url}"
     client = Client(host=host_url)
 
+    # Propagate host and vision models to tools
+    set_ollama_host(host_url)
+    if args.vision_models:
+        set_vision_models(args.vision_models)
+
     if args.list:
         print( "available models:")
         response = client.list()
@@ -189,6 +218,43 @@ def main():
 
     if args.list or args.ps:
      sys.exit(0)
+
+    # Load tools if --tool was specified (needed early for --help-tools)
+    loaded_tools = []
+    if args.tools:
+        for module_name in args.tools:
+            try:
+                module_tools = load_tools(module_name)
+                loaded_tools.extend(module_tools)
+            except Exception as e:
+                print(f"Error loading tool module '{module_name}': {e}", file=sys.stderr)
+                sys.exit(1)
+    ollama_tools = to_ollama_tools(loaded_tools) if loaded_tools else None
+
+    # Handle --help-tools
+    if args.help_tools:
+        modules = get_tool_modules_info()
+        if not modules:
+            print("No tool modules loaded. Use --tool to specify modules.", file=sys.stderr)
+            sys.exit(1)
+        for mod in modules:
+            print(f"Tool Module: {mod.module_name}")
+            if mod.env_vars:
+                print("  Environment Variables:")
+                for var, desc in mod.env_vars.items():
+                    print(f"    {var}: {desc}")
+            print("  Functions:")
+            for t in mod.tools:
+                sig_parts = []
+                for pname, pinfo in t.parameters.get("properties", {}).items():
+                    ptype = pinfo.get("type", "string")
+                    if pname in t.parameters.get("required", []):
+                        sig_parts.append(f"{pname}: {ptype}")
+                    else:
+                        sig_parts.append(f"[{pname}: {ptype}]")
+                sig = ", ".join(sig_parts)
+                print(f"    {t.name}({sig}) — {t.description}")
+        sys.exit(0)
 
     if not args.model :
         print( "Error: model has to be set (parameter -m , --model)", file=sys.stderr)
@@ -211,18 +277,6 @@ def main():
     if not args.chat and not content.strip():
         print("Error: You must provide content via -i, --inputfile, or use --stdin", file=sys.stderr)
         sys.exit(1)
-
-    # Load tools if --tool was specified
-    loaded_tools = []
-    if args.tools:
-        for module_name in args.tools:
-            try:
-                module_tools = load_tools(module_name)
-                loaded_tools.extend(module_tools)
-            except Exception as e:
-                print(f"Error loading tool module '{module_name}': {e}", file=sys.stderr)
-                sys.exit(1)
-    ollama_tools = to_ollama_tools(loaded_tools) if loaded_tools else None
 
     # File handles
     thought_file_handle = None
