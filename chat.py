@@ -22,6 +22,7 @@ class ChatState:
     output_file_handle: object = None
     max_tool_rounds: int = None
     max_tool_rounds_continuation: str = "ask"
+    ollama_websearch: bool = False
 
 
 def run_chat(state: ChatState):
@@ -63,6 +64,7 @@ def run_chat(state: ChatState):
                 output_file_handle=state.output_file_handle,
                 max_tool_rounds=state.max_tool_rounds,
                 max_tool_rounds_continuation=state.max_tool_rounds_continuation,
+                ollama_websearch=state.ollama_websearch,
             )
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -164,6 +166,7 @@ def _cmd_feed(path: str, state: ChatState):
             output_file_handle=state.output_file_handle,
             max_tool_rounds=state.max_tool_rounds,
             max_tool_rounds_continuation=state.max_tool_rounds_continuation,
+            ollama_websearch=state.ollama_websearch,
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

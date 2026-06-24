@@ -157,6 +157,7 @@ def run_with_tools(
     output_file_handle=None,
     max_tool_rounds=None,
     max_tool_rounds_continuation="ask",
+    ollama_websearch=False,
 ):
     tool_rounds = 0
     think_state = False
@@ -165,6 +166,29 @@ def run_with_tools(
     has_system = any(m.get("role") == "system" for m in messages)
     if not has_system:
         messages.insert(0, {"role": "system", "content": SAFETY_SYSTEM_PROMPT})
+
+    if ollama_websearch:
+        web_tool = OllamaTool(
+            type="function",
+            function=OllamaTool.Function(
+                name="web_search",
+                description="Search the web for current information",
+                parameters=OllamaTool.Function.Parameters(
+                    type="object",
+                    properties={
+                        "query": OllamaTool.Function.Parameters.Property(
+                            type="string",
+                            description="The search query",
+                        ),
+                    },
+                    required=["query"],
+                ),
+            ),
+        )
+        if ollama_tools:
+            ollama_tools.append(web_tool)
+        else:
+            ollama_tools = [web_tool]
 
     if verbose >= 2:
         _log_messages_payload(messages, file=sys.stderr)

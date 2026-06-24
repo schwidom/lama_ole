@@ -245,6 +245,8 @@ In chat mode (`--chat`), lines starting with `/` are commands:
 | `--max_tool_rounds_continuation` | Behavior at limit: `ask` or `fallback` | `ask` |
 | `-l, --list` | List all available models | |
 | `--ps` | List all running models | |
+| `--stop MODEL` | Stop/unload a running model from memory | |
+| `--ollama_websearch` | Activate Ollama's built-in web search tool (requires Ollama 0.5+) | |
 | `-v` to `-vvv` | Verbosity level (repeat for more) | silent |
 
 ### Verbosity Levels

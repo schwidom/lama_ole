@@ -33,7 +33,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.6"
+        version="0.0.7"
     )
     # Define arguments
     parser.add_argument(
@@ -123,6 +123,21 @@ def main():
         "--ps",
         action="store_true",
         help="List all running models and exit"
+    )
+
+    # Parameter: stop a loaded model
+    parser.add_argument(
+        "--stop",
+        type=str,
+        metavar="MODEL",
+        help="Stop/unload a running model (e.g., 'gemma2:2b')"
+    )
+
+    # Parameter: ollama websearch
+    parser.add_argument(
+        "--ollama_websearch",
+        action="store_true",
+        help="Activate Ollama's built-in web search tool"
     )
 
     # Parameter: verbose (repeatable for levels)
@@ -218,6 +233,13 @@ def main():
 
     if args.list or args.ps:
      sys.exit(0)
+
+    if args.stop:
+        client.generate(model=args.stop, keep_alive=0)
+        print(f"Stopped model: {args.stop}")
+        sys.exit(0)
+
+
 
     # Load tools if --tool was specified (needed early for --help-tools)
     loaded_tools = []
@@ -322,6 +344,7 @@ def main():
                 output_file_handle=output_file_handle,
                 max_tool_rounds=args.max_tool_rounds,
                 max_tool_rounds_continuation=args.max_tool_rounds_continuation,
+                ollama_websearch=args.ollama_websearch,
             )
             if content.strip():
                 state.messages.append({"role": "user", "content": content})
@@ -340,6 +363,7 @@ def main():
                     output_file_handle=output_file_handle,
                     max_tool_rounds=args.max_tool_rounds,
                     max_tool_rounds_continuation=args.max_tool_rounds_continuation,
+                    ollama_websearch=args.ollama_websearch,
                 )
             run_chat(state)
         else:
@@ -359,6 +383,7 @@ def main():
                 output_file_handle=output_file_handle,
                 max_tool_rounds=args.max_tool_rounds,
                 max_tool_rounds_continuation=args.max_tool_rounds_continuation,
+                ollama_websearch=args.ollama_websearch,
             )
 
     except KeyboardInterrupt:
