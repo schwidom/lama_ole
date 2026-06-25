@@ -40,7 +40,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.9"
+        version="0.0.10"
     )
     # Define arguments
     parser.add_argument(
@@ -558,6 +558,15 @@ def _parse_param_value(val):
     return val
 
 
+def _is_model_name(value):
+    if value.startswith(("/", "./", "../", "~", "@")):
+        return False
+    if "\\" in value:
+        return False
+    if value.lower().endswith((".gguf", ".bin", ".safetensors")):
+        return False
+    return True
+
 def _parse_modelfile(modelfile):
     kwargs = {}
     params = {}
@@ -565,7 +574,9 @@ def _parse_modelfile(modelfile):
 
     m = re.search(r"^FROM\s+(.+)$", text, re.MULTILINE)
     if m:
-        kwargs["from_"] = m.group(1).strip()
+        from_val = m.group(1).strip()
+        if _is_model_name(from_val):
+            kwargs["from_"] = from_val
 
     for directive in ("TEMPLATE", "SYSTEM", "LICENSE"):
         m = re.search(
