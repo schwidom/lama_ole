@@ -40,7 +40,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.8"
+        version="0.0.9"
     )
     # Define arguments
     parser.add_argument(
@@ -289,14 +289,14 @@ def main():
             source = FilesystemBlobSource()
             client_src = Client(host=_normalize_host("localhost"))
             show = client_src.show(model=args.model)
-            modelfile = show.modelfile or ""
-            _transfer_model(client_dst, args.model, source, modelfile)
+            create_kwargs = _parse_modelfile(show.modelfile or "")
+            _transfer_model(client_dst, args.model, source, create_kwargs)
         elif src_raw.startswith("http://") or src_raw.startswith("https://"):
             blob_url = src_raw.rstrip("/")
             source = HttpBlobSource(blob_url)
             config = source.get_config(args.model)
-            modelfile = _config_to_modelfile(config)
-            _transfer_model(client_dst, args.model, source, modelfile)
+            create_kwargs = _config_to_create_kwargs(config)
+            _transfer_model(client_dst, args.model, source, create_kwargs)
         else:
             print("Error: source must be 'localhost' or a blob server URL "
                   "(http://...)", file=sys.stderr)
@@ -539,64 +539,73 @@ def _upload_blobs(client_dst, blob_source, manifest):
             raise
 
 
-def _probe_dest_blob_path(client_dst, digest):
-    safe = digest.replace(":", "-")
-    candidates = [
-        f"/usr/share/ollama/.ollama/models/blobs/{safe}",
-        f"/var/snap/ollama/common/models/blobs/{safe}",
-        f"/root/.ollama/models/blobs/{safe}",
-    ]
-    for cand in candidates:
-        try:
-            client_dst.create(
-                model="__lama_ole_probe__",
-                modelfile=f"FROM {cand}",
-                stream=False,
-            )
-            client_dst.delete("__lama_ole_probe__")
-            return cand
-        except Exception:
-            continue
-    return None
+def _parse_param_value(val):
+    val = val.strip()
+    if len(val) >= 2 and val[0] == val[-1] == '"':
+        return val[1:-1]
+    if val.lower() == "true":
+        return True
+    if val.lower() == "false":
+        return False
+    try:
+        return int(val)
+    except ValueError:
+        pass
+    try:
+        return float(val)
+    except ValueError:
+        pass
+    return val
 
 
-def _replace_modelfile_from(modelfile, new_from):
-    if not modelfile:
-        return f"FROM {new_from}\n"
-    lines = modelfile.splitlines()
-    result, replaced = [], False
-    for line in lines:
-        if re.match(r"^\s*FROM\s+", line, re.IGNORECASE) and not replaced:
-            result.append(f"FROM {new_from}")
-            replaced = True
+def _parse_modelfile(modelfile):
+    kwargs = {}
+    params = {}
+    text = re.sub(r"(?m)^\s*#.*$", "", modelfile)
+
+    m = re.search(r"^FROM\s+(.+)$", text, re.MULTILINE)
+    if m:
+        kwargs["from_"] = m.group(1).strip()
+
+    for directive in ("TEMPLATE", "SYSTEM", "LICENSE"):
+        m = re.search(
+            rf'^{directive}\s+"""(.*?)"""\s*$',
+            text, re.MULTILINE | re.DOTALL,
+        )
+        if m:
+            kwargs[directive.lower()] = m.group(1).strip()
+
+    for m in re.finditer(r"^PARAMETER\s+(\S+)\s+(.+)$", text, re.MULTILINE):
+        key = m.group(1)
+        val = m.group(2).strip()
+        if key == "stop":
+            params.setdefault("stop", []).append(_parse_param_value(val))
         else:
-            result.append(line)
-    if not replaced:
-        result.insert(0, f"FROM {new_from}")
-    return "\n".join(result)
+            params[key] = _parse_param_value(val)
+
+    if params:
+        kwargs["parameters"] = params
+    return kwargs
 
 
-def _config_to_modelfile(config):
-    lines = ["FROM __PLACEHOLDER__"]
+
+def _config_to_create_kwargs(config):
+    kwargs = {}
+    params = {}
     for key, val in config.items():
         if key == "template":
-            lines.append(f'TEMPLATE """{val}"""')
+            kwargs["template"] = val
         elif key == "system":
-            lines.append(f'SYSTEM """{val}"""')
+            kwargs["system"] = val
         elif key == "license":
-            if isinstance(val, list):
-                for v in val:
-                    lines.append(f'LICENSE """{v}"""')
-            else:
-                lines.append(f'LICENSE """{val}"""')
+            kwargs["license"] = val
         elif key == "stop" and isinstance(val, list):
-            for v in val:
-                lines.append(f'PARAMETER stop "{v}"')
-        elif isinstance(val, bool):
-            lines.append(f"PARAMETER {key} {str(val).lower()}")
-        elif isinstance(val, (int, float)):
-            lines.append(f"PARAMETER {key} {val}")
-    return "\n".join(lines)
+            params["stop"] = val
+        elif not isinstance(val, (list, dict)):
+            params[key] = val
+    if params:
+        kwargs["parameters"] = params
+    return kwargs
 
 
 class BlobSource:
@@ -659,7 +668,7 @@ class HttpBlobSource(BlobSource):
         shutil.rmtree(self._temp_dir, ignore_errors=True)
 
 
-def _transfer_model(client_dst, model, blob_source, modelfile):
+def _transfer_model(client_dst, model, blob_source, create_kwargs):
     print(f"Transferring '{model}' ...", file=sys.stderr)
 
     manifest = blob_source.get_manifest(model)
@@ -670,19 +679,11 @@ def _transfer_model(client_dst, model, blob_source, modelfile):
     _upload_blobs(client_dst, blob_source, manifest)
 
     gguf_digest = _find_gguf_digest(manifest)
-    if not gguf_digest:
-        print("Error: no model blob found in manifest", file=sys.stderr)
-        sys.exit(1)
+    if gguf_digest:
+        create_kwargs.setdefault("files", {})[gguf_digest] = "model.gguf"
 
-    dest_path = _probe_dest_blob_path(client_dst, gguf_digest)
-    if not dest_path:
-        print("Error: could not determine destination model store path",
-              file=sys.stderr)
-        sys.exit(1)
-
-    new_modelfile = _replace_modelfile_from(modelfile, dest_path)
     print("  Creating model ...", file=sys.stderr, end=" ")
-    client_dst.create(model=model, modelfile=new_modelfile, stream=False)
+    client_dst.create(model=model, stream=False, **create_kwargs)
     print("OK", file=sys.stderr)
     print(f"Model '{model}' transferred successfully.", file=sys.stderr)
 
