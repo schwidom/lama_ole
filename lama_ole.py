@@ -691,7 +691,7 @@ def _transfer_model(client_dst, model, blob_source, create_kwargs):
 
     gguf_digest = _find_gguf_digest(manifest)
     if gguf_digest:
-        create_kwargs.setdefault("files", {})[gguf_digest] = "model.gguf"
+        create_kwargs.setdefault("files", {})["model.gguf"] = gguf_digest
 
     print("  Creating model ...", file=sys.stderr, end=" ")
     client_dst.create(model=model, stream=False, **create_kwargs)
