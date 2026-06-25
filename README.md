@@ -22,6 +22,9 @@ flexible input/output options.
 - **Model Listing** — List available or running models (`-l`, `--ps`).
 - **Ollama Options** — Pass through `temperature`, `num_ctx`, `num_gpu`,
   `keep_alive`.
+- **Model Transfer** — Copy models between ollama instances (`--transfer`).
+  Supports localhost-to-remote and remote-to-remote via a built-in blob HTTP
+  server (`--serve-blobs`).
 
 ## Prerequisites
 
@@ -202,6 +205,55 @@ python3 lama_ole.py -m llama3.2:3b -i "Transcribe this recording" \
 | `tools.audio_tools` | Basic audio operations | audio format conversion |
 | `tools.read_base64` | Base64 decoding | decode base64 strings |
 
+## Model Transfer
+
+lama_ole can transfer models between ollama instances using `--transfer`.
+
+### Local source to remote destination
+
+```bash
+python3 lama_ole.py -m gemma4:12b --transfer localhost other_host
+```
+
+The source must be `localhost` (the machine running lama_ole). The tool reads
+model blobs directly from the local ollama model store and uploads them to the
+destination ollama instance via its API.
+
+### Remote source via blob server
+
+On the source machine, start the blob HTTP server:
+
+```bash
+python3 lama_ole.py --serve-blobs --blob-port 9999
+```
+
+On the orchestrator machine, point `--transfer` at the blob server URL:
+
+```bash
+python3 lama_ole.py -m gemma4:12b \
+    --transfer http://192.168.1.100:9999 other_host
+```
+
+The orchestrator downloads manifests and blobs from the source's blob server,
+then uploads them to the destination's ollama API. Blobs are streamed in
+chunks to avoid memory spikes.
+
+### One-liner with SSH tunnel
+
+```bash
+ssh user@remote_source "lama_ole --serve-blobs --blob-port 9999" &
+python3 lama_ole.py -m gemma4:12b \
+    --transfer http://remote_source:9999 other_host
+```
+
+### How it works
+
+1. lama_ole reads the model manifest and all blob digests from the source
+2. Each blob is uploaded to the destination via `POST /api/blobs/`
+3. The FROM path in the Modelfile is rewritten to match the destination's
+   model store
+4. The model is created on the destination via `POST /api/create`
+
 ## Chat Commands
 
 In chat mode (`--chat`), lines starting with `/` are commands:
@@ -247,6 +299,10 @@ In chat mode (`--chat`), lines starting with `/` are commands:
 | `--ps` | List all running models | |
 | `--stop MODEL` | Stop/unload a running model from memory | |
 | `--ollama_websearch` | Activate Ollama's built-in web search tool (requires Ollama 0.5+) | |
+| `--transfer SOURCE DEST` | Transfer a model from SOURCE to DEST ollama instance | |
+| `--serve-blobs` | Start a blob HTTP server for remote transfer source | |
+| `--blob-host HOST` | Host to bind blob server | `127.0.0.1` |
+| `--blob-port PORT` | Port for blob server | random |
 | `-v` to `-vvv` | Verbosity level (repeat for more) | silent |
 
 ### Verbosity Levels

@@ -1,8 +1,15 @@
 #!/usr/bin/python3
 
 import argparse
-import sys
+import json
 import os
+import re
+import shutil
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from pathlib import Path
 from ollama import Client
 
 # Ensure the script's directory is in sys.path for sibling imports
@@ -33,7 +40,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.7"
+        version="0.0.8"
     )
     # Define arguments
     parser.add_argument(
@@ -197,6 +204,33 @@ def main():
         help="Show documentation for loaded tool modules and exit"
     )
 
+    # Parameter: transfer
+    parser.add_argument(
+        "--transfer",
+        nargs=2,
+        metavar=("SOURCE", "DEST"),
+        help="Transfer a model from SOURCE to DEST ollama instance"
+    )
+
+    # Parameter: serve-blobs
+    parser.add_argument(
+        "--serve-blobs",
+        action="store_true",
+        help="Start a blob HTTP server for remote transfer"
+    )
+    parser.add_argument(
+        "--blob-host",
+        type=str,
+        default="127.0.0.1",
+        help="Host to bind blob server (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--blob-port",
+        type=int,
+        default=0,
+        help="Port for blob server (default: random)"
+    )
+
     # Parameter: max_tool_rounds_continuation
     parser.add_argument(
         "--max_tool_rounds_continuation",
@@ -217,6 +251,11 @@ def main():
     set_ollama_host(host_url)
     if args.vision_models:
         set_vision_models(args.vision_models)
+
+    if args.serve_blobs:
+        from lama_ole.tools.blob_server import run_server
+        run_server(host=args.blob_host, port=args.blob_port)
+        sys.exit(0)
 
     if args.list:
         print( "available models:")
@@ -239,7 +278,31 @@ def main():
         print(f"Stopped model: {args.stop}")
         sys.exit(0)
 
-
+    if args.transfer:
+        src_raw, dst_host = args.transfer
+        dst_host = _normalize_host(dst_host)
+        if not args.model:
+            print("Error: --model is required for --transfer", file=sys.stderr)
+            sys.exit(1)
+        client_dst = Client(host=dst_host)
+        if src_raw == "localhost" or src_raw == "localhost:11434":
+            source = FilesystemBlobSource()
+            client_src = Client(host=_normalize_host("localhost"))
+            show = client_src.show(model=args.model)
+            modelfile = show.modelfile or ""
+            _transfer_model(client_dst, args.model, source, modelfile)
+        elif src_raw.startswith("http://") or src_raw.startswith("https://"):
+            blob_url = src_raw.rstrip("/")
+            source = HttpBlobSource(blob_url)
+            config = source.get_config(args.model)
+            modelfile = _config_to_modelfile(config)
+            _transfer_model(client_dst, args.model, source, modelfile)
+        else:
+            print("Error: source must be 'localhost' or a blob server URL "
+                  "(http://...)", file=sys.stderr)
+            sys.exit(1)
+        source.cleanup()
+        sys.exit(0)
 
     # Load tools if --tool was specified (needed early for --help-tools)
     loaded_tools = []
@@ -396,6 +459,233 @@ def main():
             thought_file_handle.close()
         if output_file_handle:
             output_file_handle.close()
+
+# ---------------------------------------------------------------------------
+# Transfer implementation
+# ---------------------------------------------------------------------------
+
+
+def _normalize_host(host):
+    if not host.startswith(("http://", "https://")):
+        host = f"http://{host}"
+    if ":" not in host.split("/")[-1]:
+        host = f"{host}:11434"
+    return host
+
+
+def _find_models_dir():
+    env = os.environ.get("OLLAMA_MODELS")
+    if env and os.path.isdir(os.path.join(env, "blobs")):
+        return env
+    candidates = [
+        os.path.expanduser("~/.ollama/models"),
+        "/usr/share/ollama/.ollama/models",
+        "/var/snap/ollama/common/models",
+    ]
+    for path in candidates:
+        if os.path.isdir(os.path.join(path, "blobs")):
+            return path
+    return os.path.expanduser("~/.ollama/models")
+
+
+def _parse_model_name(model):
+    if ":" in model:
+        name, tag = model.split(":", 1)
+    else:
+        name, tag = model, "latest"
+    return name, tag
+
+
+def _manifest_path(models_dir, model):
+    name, tag = _parse_model_name(model)
+    if "/" in name:
+        parts = ["manifests", "registry.ollama.ai"] + name.split("/")
+    else:
+        parts = ["manifests", "registry.ollama.ai", "library", name]
+    return os.path.join(models_dir, *parts, tag)
+
+
+def _read_manifest(models_dir, model):
+    path = _manifest_path(models_dir, model)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def _find_gguf_digest(manifest):
+    for layer in manifest.get("layers", []):
+        if layer.get("mediaType") == "application/vnd.ollama.image.model":
+            return layer["digest"]
+    layers = manifest.get("layers", [])
+    if layers:
+        return max(layers, key=lambda l: l.get("size", 0))["digest"]
+    return None
+
+
+def _upload_blobs(client_dst, blob_source, manifest):
+    digests = [l["digest"] for l in manifest.get("layers", [])]
+    config = manifest.get("config")
+    if config:
+        digests.append(config["digest"])
+    for digest in digests:
+        print(f"  Uploading blob {digest[:20]}...", file=sys.stderr, end=" ")
+        try:
+            blob_path = blob_source.get_blob_path(digest)
+            client_dst.create_blob(Path(blob_path))
+            print("OK", file=sys.stderr)
+        except Exception as e:
+            print(f"error: {e}", file=sys.stderr)
+            raise
+
+
+def _probe_dest_blob_path(client_dst, digest):
+    safe = digest.replace(":", "-")
+    candidates = [
+        f"/usr/share/ollama/.ollama/models/blobs/{safe}",
+        f"/var/snap/ollama/common/models/blobs/{safe}",
+        f"/root/.ollama/models/blobs/{safe}",
+    ]
+    for cand in candidates:
+        try:
+            client_dst.create(
+                model="__lama_ole_probe__",
+                modelfile=f"FROM {cand}",
+                stream=False,
+            )
+            client_dst.delete("__lama_ole_probe__")
+            return cand
+        except Exception:
+            continue
+    return None
+
+
+def _replace_modelfile_from(modelfile, new_from):
+    if not modelfile:
+        return f"FROM {new_from}\n"
+    lines = modelfile.splitlines()
+    result, replaced = [], False
+    for line in lines:
+        if re.match(r"^\s*FROM\s+", line, re.IGNORECASE) and not replaced:
+            result.append(f"FROM {new_from}")
+            replaced = True
+        else:
+            result.append(line)
+    if not replaced:
+        result.insert(0, f"FROM {new_from}")
+    return "\n".join(result)
+
+
+def _config_to_modelfile(config):
+    lines = ["FROM __PLACEHOLDER__"]
+    for key, val in config.items():
+        if key == "template":
+            lines.append(f'TEMPLATE """{val}"""')
+        elif key == "system":
+            lines.append(f'SYSTEM """{val}"""')
+        elif key == "license":
+            if isinstance(val, list):
+                for v in val:
+                    lines.append(f'LICENSE """{v}"""')
+            else:
+                lines.append(f'LICENSE """{val}"""')
+        elif key == "stop" and isinstance(val, list):
+            for v in val:
+                lines.append(f'PARAMETER stop "{v}"')
+        elif isinstance(val, bool):
+            lines.append(f"PARAMETER {key} {str(val).lower()}")
+        elif isinstance(val, (int, float)):
+            lines.append(f"PARAMETER {key} {val}")
+    return "\n".join(lines)
+
+
+class BlobSource:
+    def get_manifest(self, model_name):
+        raise NotImplementedError
+
+    def get_blob_path(self, digest):
+        raise NotImplementedError
+
+    def cleanup(self):
+        pass
+
+
+class FilesystemBlobSource(BlobSource):
+    def __init__(self, models_dir=None):
+        self.models_dir = models_dir or _find_models_dir()
+
+    def get_manifest(self, model_name):
+        return _read_manifest(self.models_dir, model_name)
+
+    def get_blob_path(self, digest):
+        safe = digest.replace(":", "-")
+        return os.path.join(self.models_dir, "blobs", safe)
+
+
+class HttpBlobSource(BlobSource):
+    def __init__(self, base_url):
+        self.base_url = base_url.rstrip("/")
+        self._temp_dir = tempfile.mkdtemp(prefix="lama_ole_blobs_")
+
+    def get_manifest(self, model_name):
+        name, tag = _parse_model_name(model_name)
+        url = f"{self.base_url}/manifest/{name}/{tag}"
+        with urllib.request.urlopen(url) as resp:
+            return json.loads(resp.read().decode())
+
+    def get_blob_path(self, digest):
+        safe = digest.replace(":", "-")
+        local_path = os.path.join(self._temp_dir, safe)
+        if os.path.exists(local_path):
+            return local_path
+        url = f"{self.base_url}/blobs/{safe}"
+        with urllib.request.urlopen(url) as resp, \
+             open(local_path, "wb") as f:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+        return local_path
+
+    def get_config(self, model_name):
+        name, tag = _parse_model_name(model_name)
+        url = f"{self.base_url}/show/{name}/{tag}"
+        with urllib.request.urlopen(url) as resp:
+            data = json.loads(resp.read().decode())
+        return data.get("config", {})
+
+    def cleanup(self):
+        shutil.rmtree(self._temp_dir, ignore_errors=True)
+
+
+def _transfer_model(client_dst, model, blob_source, modelfile):
+    print(f"Transferring '{model}' ...", file=sys.stderr)
+
+    manifest = blob_source.get_manifest(model)
+    if not manifest:
+        print("Error: manifest not found", file=sys.stderr)
+        sys.exit(1)
+
+    _upload_blobs(client_dst, blob_source, manifest)
+
+    gguf_digest = _find_gguf_digest(manifest)
+    if not gguf_digest:
+        print("Error: no model blob found in manifest", file=sys.stderr)
+        sys.exit(1)
+
+    dest_path = _probe_dest_blob_path(client_dst, gguf_digest)
+    if not dest_path:
+        print("Error: could not determine destination model store path",
+              file=sys.stderr)
+        sys.exit(1)
+
+    new_modelfile = _replace_modelfile_from(modelfile, dest_path)
+    print("  Creating model ...", file=sys.stderr, end=" ")
+    client_dst.create(model=model, modelfile=new_modelfile, stream=False)
+    print("OK", file=sys.stderr)
+    print(f"Model '{model}' transferred successfully.", file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()
