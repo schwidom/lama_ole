@@ -40,7 +40,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.11"
+        version="0.0.12"
     )
     # Define arguments
     parser.add_argument(
@@ -240,6 +240,13 @@ def main():
         help="Behavior when max_tool_rounds is reached: 'ask' (interactive menu) or 'fallback' (silent default)"
     )
 
+    # Parameter: no_safety_system_prompt
+    parser.add_argument(
+        "--no_safety_system_prompt",
+        action="store_true",
+        help="Enables potential takeover when tools are used"
+    )
+
     args = parser.parse_args()
 
     host_url = args.host
@@ -401,6 +408,7 @@ def main():
                 options=options,
                 keep_alive=args.keep_alive,
                 show_thinking=args.thinking,
+                no_safety_system_prompt=args.no_safety_system_prompt,
                 verbose=args.verbose,
                 safe=args.safe,
                 thought_file_handle=thought_file_handle,
@@ -420,6 +428,7 @@ def main():
                     options=options,
                     keep_alive=args.keep_alive,
                     show_thinking=args.thinking,
+                    no_safety_system_prompt= args.no_safety_system_prompt,
                     verbose=args.verbose,
                     safe=args.safe,
                     thought_file_handle=thought_file_handle,
@@ -440,6 +449,7 @@ def main():
                 options=options,
                 keep_alive=args.keep_alive,
                 show_thinking=args.thinking,
+                no_safety_system_prompt= args.no_safety_system_prompt,
                 verbose=args.verbose,
                 safe=args.safe,
                 thought_file_handle=thought_file_handle,

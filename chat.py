@@ -16,6 +16,7 @@ class ChatState:
     options: dict = field(default_factory=dict)
     keep_alive: object = None
     show_thinking: bool = False
+    no_safety_system_prompt: bool = False
     verbose: int = 0
     safe: bool = False
     thought_file_handle: object = None
@@ -58,6 +59,7 @@ def run_chat(state: ChatState):
                 options=state.options,
                 keep_alive=state.keep_alive,
                 show_thinking=state.show_thinking,
+                no_safety_system_prompt=state.no_safety_system_prompt,
                 verbose=state.verbose,
                 safe=state.safe,
                 thought_file_handle=state.thought_file_handle,
@@ -160,6 +162,7 @@ def _cmd_feed(path: str, state: ChatState):
             options=state.options,
             keep_alive=state.keep_alive,
             show_thinking=state.show_thinking,
+            no_safety_system_prompt=state.no_safety_system_prompt,
             verbose=state.verbose,
             safe=state.safe,
             thought_file_handle=state.thought_file_handle,
