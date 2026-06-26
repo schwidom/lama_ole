@@ -40,7 +40,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.10"
+        version="0.0.11"
     )
     # Define arguments
     parser.add_argument(
@@ -360,7 +360,7 @@ def main():
         content = sys.stdin.read()
 
     if not args.chat and not content.strip():
-        print("Error: You must provide content via -i, --inputfile, or use --stdin", file=sys.stderr)
+        print("Error: You must provide content via -i, --inputfile, --stdin or use --chat", file=sys.stderr)
         sys.exit(1)
 
     # File handles
