@@ -40,7 +40,7 @@ def main():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.12"
+        version="0.0.13"
     )
     # Define arguments
     parser.add_argument(
@@ -260,7 +260,7 @@ def main():
         set_vision_models(args.vision_models)
 
     if args.serve_blobs:
-        from lama_ole.tools.blob_server import run_server
+        from tools.blob_server import run_server
         run_server(host=args.blob_host, port=args.blob_port)
         sys.exit(0)
 
