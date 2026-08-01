@@ -41,12 +41,12 @@ class TestEditTool(unittest.TestCase):
         
         self.assertEqual(content, "Hello universe!\nThis is a test.\nGoodbye world!")
 
-#     def test_edit_error_file_not_found(self):
-#         """Test error when the file does not exist."""
-#         non_existent_path = os.path.join(self.test_dir, "ghost.txt")
-#         result = edit(non_existent_path, "search", "replace")
-#         self.assertIn("Error: File", result)
-#         self.assertIn("does not exist", result)
+    def test_edit_error_file_not_found(self):
+        """Test error when the file does not exist."""
+        non_existent_path = os.path.join(self.test_dir, "ghost.txt")
+        result = edit(non_existent_path, "search", "replace")
+        self.assertIn("Error: File", result)
+        self.assertIn("does not exist", result)
 # 
     def test_edit_error_multiple_matches(self):
         """Test error when the search string appears more than once."""
