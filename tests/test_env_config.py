@@ -212,17 +212,46 @@ class TestResolveEnvDefaults:
         _resolve_env_defaults(args)
         assert args.tools == ["tools.web_tools", "tools.edit"]
 
-    def test_cli_tools_strictly_override(self, env_patch, monkeypatch):
+    def test_cli_tools_merge_with_env(self, env_patch, monkeypatch):
         monkeypatch.setenv("LAMA_OLE_TOOL", "tools.web_tools tools.edit")
         args = build_parser().parse_args(["--tool", "tools.example_tools"])
         _resolve_env_defaults(args)
-        assert args.tools == ["tools.example_tools"]
+        assert args.tools == ["tools.web_tools", "tools.edit", "tools.example_tools"]
+
+    def test_merge_dedups_env_first(self, env_patch, monkeypatch):
+        monkeypatch.setenv("LAMA_OLE_TOOL", "tools.a tools.b")
+        args = build_parser().parse_args(["--tool", "tools.b", "--tool", "tools.c"])
+        _resolve_env_defaults(args)
+        assert args.tools == ["tools.a", "tools.b", "tools.c"]
+
+    def test_ignore_config_tools_uses_cli_only(self, env_patch, monkeypatch):
+        monkeypatch.setenv("LAMA_OLE_TOOL", "tools.web_tools tools.edit")
+        args = build_parser().parse_args(["--ignore-config-tools", "--tool", "tools.c"])
+        _resolve_env_defaults(args)
+        assert args.tools == ["tools.c"]
+
+    def test_ignore_config_tools_without_cli_leaves_none(self, env_patch, monkeypatch):
+        monkeypatch.setenv("LAMA_OLE_TOOL", "tools.web_tools tools.edit")
+        args = build_parser().parse_args(["--ignore-config-tools"])
+        _resolve_env_defaults(args)
+        assert args.tools is None
+
+    def test_cli_tools_deduped_when_repeated(self, env_patch):
+        args = build_parser().parse_args(["--tool", "tools.a", "--tool", "tools.a"])
+        _resolve_env_defaults(args)
+        assert args.tools == ["tools.a"]
 
     def test_vision_models_env(self, env_patch, monkeypatch):
         monkeypatch.setenv("LAMA_OLE_VISION_MODEL", "llava, gemma3")
         args = build_parser().parse_args([])
         _resolve_env_defaults(args)
         assert args.vision_models == ["llava", "gemma3"]
+
+    def test_vision_models_cli_strictly_overrides(self, env_patch, monkeypatch):
+        monkeypatch.setenv("LAMA_OLE_VISION_MODEL", "llava, gemma3")
+        args = build_parser().parse_args(["--vision_model", "qwen2.5-vl"])
+        _resolve_env_defaults(args)
+        assert args.vision_models == ["qwen2.5-vl"]
 
     def test_no_env_leaves_none(self, env_patch):
         args = build_parser().parse_args([])

@@ -412,7 +412,9 @@ LAMA_OLE_TEMPERATURE=0.2
 python3 lama_ole.py                                # chat, llama3.2:3b, thinking+safe, example/web tools
 python3 lama_ole.py --no-thinking                 # same, but thinking off
 python3 lama_ole.py --no-chat -i "explain X"      # one-shot query, thinking still on
-python3 lama_ole.py --tool tools.audio_tools      # CLI --tool replaces the config tools
+python3 lama_ole.py --tool tools.audio_tools      # config tools + audio_tools (merged)
+python3 lama_ole.py --ignore-config-tools --tool tools.audio_tools
+                                                  # audio_tools only
 ```
 
 Because `--chat`, `--thinking`, `--safe` and `--ollama_websearch` accept both
@@ -435,7 +437,7 @@ the configured default.
 | `LAMA_OLE_OLLAMA_WEBSRCH` | boolean | `--ollama_websearch` / `--no-ollama_websearch` |
 | `LAMA_OLE_VERBOSE` | integer | `-v, --verbose` (CLI `-v` adds to it) |
 | `LAMA_OLE_COLOR` | string | `--color` |
-| `LAMA_OLE_TOOL` | space/comma-separated list | `--tool` (CLI replaces) |
+| `LAMA_OLE_TOOL` | space/comma-separated list | `--tool` (CLI appends, deduped) |
 | `LAMA_OLE_VISION_MODEL` | space/comma-separated list | `--vision_model` (CLI replaces) |
 | `LAMA_OLE_MAX_TOOL_ROUNDS` | integer | `--max_tool_rounds` |
 | `LAMA_OLE_MAX_TOOL_ROUNDS_CONTINUATION` | string | `--max_tool_rounds_continuation` |
@@ -443,8 +445,10 @@ the configured default.
 | `LAMA_OLE_SYSTEM_PROMPT_FILE` | string | `--system_prompt_file` |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off` (case-insensitive).
-Repeatable flags (`--tool`, `--vision_model`) always replace the configured
-default when given on the command line.
+`--tool` values are merged with the configured default (config first, deduplicated)
+unless `--ignore-config-tools` is given, which uses only the CLI `--tool` values.
+`--vision_model` always replaces the configured default when given on the command
+line.
 
 Tool modules may read additional environment variables, e.g.
 `LAMA_OLE_VISION_HOST` (see `--help-tools`). These can live in the same

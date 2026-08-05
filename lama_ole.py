@@ -313,7 +313,16 @@ def build_parser():
         action="append",
         dest="tools",
         default=None,
-        help="Python module name providing tool functions (can be repeated)"
+        help="Python module name providing tool functions (can be repeated); "
+             "appends to tools configured via LAMA_OLE_TOOL"
+    )
+
+    # Parameter: ignore-config-tools
+    parser.add_argument(
+        "--ignore-config-tools",
+        action="store_true",
+        help="Ignore tools configured via LAMA_OLE_TOOL (shell/env/config) "
+             "for this run; only --tool values are used"
     )
 
     # Parameter: max_tool_rounds
@@ -412,10 +421,24 @@ def build_parser():
     return parser
 
 
+def _merge_tool_lists(env_tools, cli_tools):
+    """Combine env/config defaults with CLI tools, deduped, env-first.
+
+    First occurrence wins so a module listed both in config and on the CLI is
+    loaded once (load_tools() appends module info on every call).
+    """
+    merged = []
+    for item in (env_tools or []) + (cli_tools or []):
+        if item not in merged:
+            merged.append(item)
+    return merged or None
+
+
 def _resolve_env_defaults(args):
-    # Strict override: CLI-provided repeatables replace env/config defaults
-    if args.tools is None:
-        args.tools = _env_list("LAMA_OLE_TOOL")
+    # --tool: merge env/config defaults with CLI values (unless ignored).
+    # --vision_model: strict override (CLI replaces env/config defaults).
+    if not args.ignore_config_tools:
+        args.tools = _merge_tool_lists(_env_list("LAMA_OLE_TOOL"), args.tools)
     if args.vision_models is None:
         args.vision_models = _env_list("LAMA_OLE_VISION_MODEL")
 
