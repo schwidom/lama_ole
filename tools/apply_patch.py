@@ -1,7 +1,6 @@
 """Tools for applying patches to files using diff_match_patch."""
 
 import os
-import difflib
 from diff_match_patch import diff_match_patch
 from tool_base import tool
 from tools_security.validate_path import validate_path as _validate_path
@@ -32,10 +31,10 @@ def apply_patch(path: str, patch_string: str) -> str:
     # 1. Safety Check
     safety_error = _validate_path(path)
     if safety_error:
-        return {"status": "error", "message": [safety_error]}
+        return safety_error
 
     if not os.path.exists(path):
-        return {"status": "error", "message": [f"Error: File {path} does not exist."]}
+        return f"Error: File {path} does not exist."
 
     try:
         # 2. Read original content
@@ -53,27 +52,11 @@ def apply_patch(path: str, patch_string: str) -> str:
         if all(success_flags):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(patched_text)
-            diff = "".join(
-                difflib.unified_diff(
-                    original_text.splitlines(keepends=True),
-                    patched_text.splitlines(keepends=True),
-                    fromfile=path,
-                    tofile=path,
-                )
-            ).rstrip()
-            return {
-                "status": "success",
-                "data": f"Successfully applied patch to {path}.",
-                "file": path,
-                "diff": diff,
-            }
+            return f"Successfully applied patch to {path}."
         else:
             # If some parts failed, we return a warning but don't overwrite 
             # the file to prevent corruption of partial states.
-            return {
-                "status": "error",
-                "message": [f"Warning: Some parts of the patch failed to apply to {path}."],
-            }
+            return f"Warning: Some parts of the patch failed to apply to {path}."
 
     except Exception as e:
-        return {"status": "error", "message": [f"Error applying patch: {str(e)}"]}
+        return f"Error applying patch: {str(e)}"

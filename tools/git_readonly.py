@@ -1,7 +1,3 @@
-"""Read-only git tools for lama_ole."""
-
-__tool_readonly__ = True
-
 import os
 import subprocess
 from typing import Any, Dict

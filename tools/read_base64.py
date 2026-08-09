@@ -1,7 +1,5 @@
 """Development tools for lama_ole — filesystem, code, and git operations."""
 
-__tool_readonly__ = True
-
 import base64
 import os
 import re
