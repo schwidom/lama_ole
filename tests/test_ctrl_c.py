@@ -165,13 +165,40 @@ def test_run_chat_interrupt_during_turn_rolls_back_and_continues(
     assert "outputting" in err
 
 
+def test_run_chat_applies_output_format(monkeypatch, capsys):
+    state = chat.ChatState(
+        client=FakeClient(content="reply"), model="test", color="never"
+    )
+    sequence = ["hello", EOFError()]
+
+    def fake_input(prompt):
+        item = sequence.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setenv("LAMA_OLE_FORMAT_OUTPUT", "[{num}] OUT: {text}")
+    monkeypatch.setattr("builtins.input", fake_input)
+    chat.run_chat(state)
+
+    out = capsys.readouterr().out
+    assert "[2] OUT: reply" in out
+    assert "Chat mode. Type /help for commands." in out
+
+
 def test_main_initial_content_interrupt_falls_back_to_repl(monkeypatch, capsys):
-    class FakeClient:
+    class FakeRouter:
         def __init__(self, *args, **kwargs):
             pass
 
         def chat(self, **kwargs):
             raise KeyboardInterrupt()
+
+        def canonicalize(self, model_id):
+            return model_id
+
+        def resolve_default_model(self):
+            return None
 
     calls = {"run_chat": 0}
     seen = {"state": None}
@@ -180,7 +207,7 @@ def test_main_initial_content_interrupt_falls_back_to_repl(monkeypatch, capsys):
         calls["run_chat"] += 1
         seen["state"] = state
 
-    monkeypatch.setattr(lama_ole_cli, "Client", FakeClient)
+    monkeypatch.setattr(lama_ole_cli, "create_router", FakeRouter)
     monkeypatch.setattr(lama_ole_cli, "run_chat", fake_run_chat)
     monkeypatch.setattr(lama_ole_cli, "load_env_files", lambda: None)
     for key in (
@@ -286,8 +313,8 @@ def test_run_chat_interrupt_keeps_completed_tool_rounds(monkeypatch, capsys):
     # The completed tool calls are visible in /history.
     chat._cmd_history("", state)
     out = capsys.readouterr().out
-    assert "ASSISTANT (TOOLCALL) TOOL: [data from read_file: path='a.txt']" in out
-    assert "ASSISTANT (TOOLCALL) TOOL: [data from read_file: path='b.txt']" in out
+    assert "tools: [data from read_file: path='a.txt']" in out
+    assert "tools: [data from read_file: path='b.txt']" in out
 
 
 def test_run_chat_interrupt_during_tool_execution_drops_dangling_toolcall(

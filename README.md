@@ -2,9 +2,9 @@
 
 # lama_ole
 
-A CLI tool to interact with **Ollama** instances. Supports streaming chat, tool
-calling, thinking-process handling, media understanding (image/video/audio), and
-flexible input/output options.
+A CLI tool to interact with **Ollama** and **llama.cpp** (`llama-server`)
+instances. Supports streaming chat, tool calling, thinking-process handling,
+media understanding (image/video/audio), and flexible input/output options.
 
 ## For the impatient developer
 ```
@@ -35,6 +35,9 @@ lama_ole.py --host localhost -m gemma4:26b-a4b-it-qat --chat -t -v --tool tools.
 - **Media Understanding** — Image description/OCR, video frame analysis, audio
   transcription via bundled `tools.media_understanding_tools`.
 - **Model Listing** — List available or running models (`-l`, `--ps`).
+- **Dual Backends** — Use Ollama and a llama.cpp `llama-server` side by side;
+  the backend is selected per model by its `ollama.` / `llamacpp.` name
+  namespace (`--ollama-host` / `--llamacpp-host`).
 - **Ollama Options** — Pass through `temperature`, `num_ctx`, `num_gpu`,
   `keep_alive`.
 - **Model Transfer** — Copy models between ollama instances (`--transfer`).
@@ -91,6 +94,96 @@ With an initial system message:
 ```bash
 python3 lama_ole.py --chat -m llama3.2:3b -i "You are a helpful assistant."
 ```
+
+## llama.cpp Backend
+
+lama_ole can also talk to a **llama.cpp** `llama-server` (the OpenAI-compatible
+HTTP server that ships with llama.cpp) in parallel with Ollama. The backend is
+selected per model via a name namespace, so a single session can switch between
+the two with `/model`.
+
+Start the server (tool calling requires the `--jinja` flag):
+
+```bash
+llama-server -m /models/qwen2.5-7b-instruct-q4_k_m.gguf --jinja --port 8080
+```
+
+Use a llama.cpp model by prefixing its served id with `llamacpp.`:
+
+```bash
+python3 lama_ole.py -m llamacpp.qwen2.5-7b-instruct-q4_k_m.gguf -i "Hello!"
+```
+
+### Hosts
+
+- `--ollama-host` / `--host` (env `LAMA_OLE_HOST_OLLAMA`, default
+  `http://localhost:11434`) — the Ollama server. The legacy name
+  `LAMA_OLE_HOST` is still honored with a deprecation warning.
+- `--llamacpp-host` (env `LAMA_OLE_HOST_LLAMACPP`, default
+  `http://localhost:8080`) — the llama.cpp `llama-server`. The legacy name
+  `LAMA_OLE_LLAMACPP_HOST` is still honored with a deprecation warning.
+- `LAMA_OLE_HOST_LLAMACPP_API_KEY` — sent as a `Bearer` token if the server is
+  configured with an API key (legacy `LAMA_OLE_LLAMACPP_API_KEY` still honored).
+- `--llamacpp-autostart` / `--no-llamacpp-autostart` (env
+  `LAMA_OLE_LLAMACPP_AUTOSTART`, default **on**) — start a `llama-server` when
+  none is running; only for a **local** host (a remote llama.cpp server is
+  never shadowed). See "Supported features" for what it serves and how it is
+  configured (`LAMA_OLE_LLAMACPP_BIN`, `LAMA_OLE_LLAMACPP_MODELS_DIR`,
+  `LAMA_OLE_LLAMACPP_ARGS`, `LAMA_OLE_LLAMACPP_STOP_ON_EXIT`).
+
+Both hosts can be set in the env file
+(`~/.config/lama_ole/lama_ole.env` or `./lama_ole.env`).
+
+### Model naming
+
+The namespace is everything before the *first* dot; when it is not a known
+backend name, the model belongs to Ollama.
+
+| Model id | Backend |
+|----------|---------|
+| `gemma2:2b` | Ollama |
+| `ollama.gemma2:2b` | Ollama |
+| `llamacpp.qwen2.5-7b-q4_k_m.gguf` | llama.cpp |
+| `/models/qwen.gguf` | llama.cpp (basename becomes the id) |
+
+`/model` completion lists both backends together (`ollama.…` and
+`llamacpp.…`). When `-m` is omitted, lama_ole defaults to the first llama.cpp
+model if Ollama is unreachable but the llama-server is serving models.
+
+### Supported features
+
+Streaming, tool calling, thinking display (`-t`, `--thoughtlog`), the context
+meter, `/stats`, compaction, and `/model` switching all work against both
+backends. llama.cpp specifics:
+
+- When no llama-server answers at the llama.cpp host, lama_ole **auto-starts
+  one** (default on; `--no-llamacpp-autostart` or
+  `LAMA_OLE_LLAMACPP_AUTOSTART=false` disables it). This only engages for a
+  **local** host (`localhost`, `127.0.0.1`, `::1`) — a remote llama.cpp server
+  is never shadowed by a local spawn. The server is always started in
+  **router mode**, serving the llama.cpp cache (`$LLAMA_CACHE` or
+  `~/.cache/llama.cpp`) and `LAMA_OLE_LLAMACPP_MODELS_DIR`, so `/model`
+  completion and mid-chat switching see every cached model. An
+  `owner/name[:tag]` Hugging Face id is served only once the server lists it
+  (checked against `/v1/models`, not a local path guess); if a targeted HF
+  model is missing, a stderr notice explains the one-time download (e.g.
+  `llama-server --hf-repo owner/name:quant`). Binary:
+  `LAMA_OLE_LLAMACPP_BIN` or `llama-server` on PATH; extra args via
+  `LAMA_OLE_LLAMACPP_ARGS`. A server lama_ole started is killed when lama_ole
+  exits (set `LAMA_OLE_LLAMACPP_STOP_ON_EXIT=false` to leave it running so
+  later runs reuse it).
+- When lama_ole starts the server, `--num_ctx`, `--num_gpu`, and `--keep_alive`
+  are honored at launch (`-c`, `-ngl`, `--sleep-idle-seconds`), and later runs
+  recognize the autostarted daemon from a state marker so those options stay
+  quiet. Against a server it did not start, or when the request differs from
+  the launch-time values, they are ignored with a one-time actionable warning
+  (the `num_ctx` warning reports the server's actual window from `/props`).
+- Per-request sampling options (`--temperature`, `--top_p`, `--top_k`,
+  `--repeat_penalty`, `--presence_penalty`, `--frequency_penalty`, `--min_p`,
+  `--seed`) are forwarded to the server; `num_ctx`/`num_gpu` are never sent
+  per request.
+- `--ollama_websearch` is unavailable and skipped with a warning.
+- Media-understanding tools and `--transfer` remain Ollama-only.
 
 ## Tool Calling
 
@@ -343,7 +436,8 @@ In chat mode (`--chat`), lines starting with `/` are commands:
 | `/save <path>` | Save the conversation to a JSON file (model, messages, active skill, system prompt and loaded toolsets) |
 | `/load <path>` | Load a conversation from a JSON file (restores the active skill, system prompt and re-loads toolsets) |
 | `/resume [match]` | Resume a saved session; without an argument it lists sessions and prompts, with a session-id or title substring it loads directly |
-| `/sessions` | List all saved sessions |
+| `/sessions [all]` | List sessions in the current directory (1 = oldest, newest shown first); `all` includes every project. `rm` subcommand deletes session files |
+| `/sessions rm <N \| -N \| a..b \| all>` | Delete session file(s) by number (`N` = exactly session N, `-N` = the N most recent, `a..b` = an inclusive range, `all` = everything), space-separated selectors allowed; always asks for confirmation |
 | `/stats` | Show the current model, the last turn's per-round breakdown (time, tokens, tok/s), and session averages per model |
 | `/rename <new title>` | Rename the current session (persists across autosaves) |
 | `/rename <id-prefix> <new title>` | Rename a stored session by session-id prefix |
@@ -362,7 +456,7 @@ In chat mode (`--chat`), lines starting with `/` are commands:
 | `/systemprompt unset` | Unset the system prompt (back to default) |
 | `/context` | Show context usage (tokens/window/percentage + breakdown), or `/context on` / `/context off` to toggle the meter |
 | `/history [<selector> ...]` | Show conversation history entries with numbers (see below) |
-| `/cut <N> \| <a..b> \| undo` | Remove entries from the conversation history (see below) |
+| `/cut <N> \| <a..b> \| undo` | Trim the conversation history to a selection (see below) |
 | `/help` | Show this help message |
 | `/exit`, `/quit` | Exit the chat |
 
@@ -475,11 +569,11 @@ and `/load`.
   stored inside the file.
 * **Auto-resume**: starting `--chat` restores the most recent session for the
   current directory and prints a notice. The restored conversation is then
-  replayed (user prompts and assistant replies, in their original colors) so
-  it reads like you never left; thinking captured with `-t` is replayed only
-  when `-t` is on, and tool call/result markers only in verbose mode — both
-  matching their live visibility. If the session model differs
-  from the CLI `-m`, you are asked which to keep (session / CLI / abort).
+  replayed as a numbered listing that looks exactly like `/history` — the same
+  `[N] [ts]` prefixes, role labels and colors (the views use the per-view
+  format templates described in "History and cutting"). If the session model
+  differs from the CLI `-m`, you are asked which to keep (session / CLI /
+  abort).
   `/resume` and `/load` replay the history the same way.
 * **Opt out**: the two behaviors are independent toggles, both on by default:
   * `--no-resume` (or `LAMA_OLE_RESUME=false`) disables auto-loading.
@@ -488,8 +582,17 @@ and `/load`.
   `/resume` and `/sessions` still work for manual recovery either way.
 * **Renames/moves**: if a project directory is renamed, its sessions no
   longer match the new path automatically. Run `/resume` — sessions recorded
-  elsewhere are listed (marked `[moved]`) and resuming one re-associates it
-  to the current directory.
+  elsewhere are listed under "Other projects" and resuming one re-associates
+  it to the current directory.
+* **Listing**: `/sessions` lists the current directory's sessions only;
+  `/sessions all` shows every project, grouped by its recorded cwd. Sessions
+  are numbered like `/history` (1 = oldest, highest = newest) but displayed
+  newest first, so the newest session always sits on top. `*` marks the active
+  session, and the footer prints the sessions directory plus the active
+  session's file path. Bare `/sessions rm` prints the full listing and prompts;
+  with a selection it deletes the matching file(s) after a `y/N` confirmation
+  (the numbers are a positional alias — the session-id is the stable identity
+  for `/resume` and `/rename`).
 * **`/new`**: archives the current session (leaving it restorable) and
   starts a fresh one.
 * **`/stats`**: shows the current model, the last turn's per-round breakdown
@@ -508,10 +611,59 @@ and `/load`.
 
 ### History and cutting
 
-Every conversation message is numbered from **M** (oldest) down to **1**
+Every conversation message is numbered from **1** (oldest) up to **M**
 (newest), where M is the total number of messages — the same numbering used by
 `/history` and `/cut`. System messages are hidden from `/history` and are never
 removed by `/cut`.
+
+A resumed session is replayed as a numbered listing that looks exactly like
+`/history` (same prefixes, labels and colors), so the two views never diverge.
+How lines are rendered is driven by **line templates** set through environment
+variables:
+
+- `LAMA_OLE_FORMAT_HISTORY` — the `/history` view.
+- `LAMA_OLE_FORMAT_REPLAY` — session replay.
+- `LAMA_OLE_FORMAT_OUTPUT` — the live `--chat` assistant stream. It uses the
+  same `[{num}] {t}{role}: {text}` header as the other views by default, so the
+  timestamp and role positions are identical across every output.
+
+Each entry type has one template. A value is either a bare template applied to
+every visible type, or semicolon-separated `type=template` pairs. Types may be
+named by their canonical key or a role-name alias: `user`, `output`
+(alias `assistant`), `thinking`, `toolcall`, `tool_result` (alias `tool`),
+`compacted`. An empty template (`type=`) hides that entry type. The display
+names behind the `{role}` token are customized with `name.<role>=<label>`
+pairs (roles: `user`, `assistant`, `thinking`, `toolcall`, `tool`,
+`compacted`); a toolcall entry uses just `name.toolcall` for its label, since
+the invoked tool already appears in the `[data from ...]` summary. Tokens:
+
+- `{num}` — the entry number (`1` = oldest, `M` = newest)
+- `{t}` — `HH:MM:SS ` when the message carries a timestamp, else empty
+- `{ts}` — `[<full time>] ` (with date) when a timestamp is present, else empty
+- `{role}` — the display name (`You`, `Me`, `thinking`, `tools`, ...);
+  override it with `name.<role>=<label>` rather than inlining labels into
+  every template
+- `{text}` — the message text (tool calls render as `[data from <name>: <args>]`)
+- `{tool}` / `{args}` — the tool name / arguments (tool entries only)
+
+The default is `[{num}] {t}{role}: {text}` for all visible types with the
+friendly labels `You`, `Me`, `thinking`, `tools`, `summary`, and an empty
+template for `tool_result` (hidden). An invalid template falls back to the
+default and prints a warning once. Colors are applied per entry type whenever
+color mode is on; there is no per-line color setting. Examples:
+
+```sh
+LAMA_OLE_FORMAT_HISTORY="[{num}] {t}{role}: {text}"     # built-in /history default
+LAMA_OLE_FORMAT_REPLAY="user=[{num}] You: {text};assistant=[{num}] Bot: {text}"
+LAMA_OLE_FORMAT_OUTPUT="{text}"                         # raw streamed output (no header)
+LAMA_OLE_FORMAT_OUTPUT="[{num}] {t}{role}: {text}"      # default live chat header
+```
+
+`/history -t` forces tool results on for one listing: a hidden `tool_result`
+template is replaced by the default template when no explicit `tool_result`
+value is set.
+The live chat stream has its own `LAMA_OLE_FORMAT_OUTPUT` template; it is
+independent from the `/history` and replay views.
 
 #### `/history`
 
@@ -519,16 +671,16 @@ removed by `/cut`.
 oldest to newest. By default it shows user messages, assistant output, thinking
 and tool calls; tool **responses** are shown only with `-t`.
 
-Every entry is prefixed with the time the event happened, e.g.
-`[7] [2026-08-09 09:01:00] USER: ...`. Tool calls show the concrete function
-name and arguments (`TOOL: [data from read_file: path='lama_ole/AGENTS.md']`),
-not just an empty `ASSISTANT (TOOLCALL)` marker; the full tool response data
-still requires `-t`.
+Every entry is prefixed with the short time the event happened, e.g.
+`[7] 09:01:00 You: ...`. Tool calls show the concrete function
+name and arguments (`tools: [data from read_file: path='lama_ole/AGENTS.md']`),
+not just an empty marker; the full tool response data still requires `-t` (or a
+`tool_result` line template in `LAMA_OLE_FORMAT_HISTORY`).
 
 | Command | Shows |
 |---------|-------|
-| `/history` | all entries (output, thinking, tool calls) |
-| `/history -t` | all entries including tool responses |
+| `/history` | all entry types with a non-empty template |
+| `/history -t` | all entry types including tool responses |
 | `/history -10` | the last 10 entries |
 | `/history 10` | the first 10 entries |
 | `/history 10 -10` | the first 10 and the last 10 entries |
@@ -539,20 +691,23 @@ Ranges and numbers can be combined freely in one command.
 
 #### `/cut`
 
-`/cut` surgically removes entries from the conversation history. The removed
-messages are stored so they can be restored with `/cut undo`. System messages
-are never removed.
+`/cut` trims the conversation down to the entries you name — everything else
+is removed. The removed messages are stored so they can be restored with
+`/cut undo`. System messages are never removed.
 
-| Command | Effect |
-|---------|--------|
-| `/cut N` | removes the last N entries (numbers `1..N`) |
-| `/cut a..b` | removes the entries numbered `a` to `b` |
-| `/cut undo` | restores the messages removed by the last `/cut` |
+| Command | Keeps | Removes |
+|---------|-------|---------|
+| `/cut N` | entries `N..M` (from entry N to the newest) | the older `1..N-1` |
+| `/cut -N` | the last N entries | everything older |
+| `/cut a..b` | only the entries numbered `a` to `b` | everything else |
+| `/cut undo` | — | restores what the last `/cut` removed |
 
-Example: after a `/cut 3`, the three most recent entries are gone, and the
-conversation continues from the remaining history. `/cut undo` brings them
-back, and a later `/cut` replaces the undo buffer (only the most recent cut is
-undoable).
+Example: after a `/cut 3`, the conversation is trimmed to entries `3..M`; the
+first two entries are gone. `/cut -3` keeps only the three most recent entries.
+`/cut undo` brings the removed messages back, and a later `/cut` replaces the
+undo buffer (only the most recent cut is undoable). Note the asymmetry with
+`/history`: `/history 3` *shows* the first 3 entries, while `/cut 3` *keeps*
+from entry 3 onward.
 
 #### Interruptions (Ctrl-C)
 
@@ -727,7 +882,14 @@ the configured default.
 
 | Variable | Type | Flag |
 | :--- | :--- | :--- |
-| `LAMA_OLE_HOST` | string | `--host` |
+| `LAMA_OLE_HOST_OLLAMA` | string | `--host` |
+| `LAMA_OLE_HOST_LLAMACPP` | string | `--llamacpp-host` |
+| `LAMA_OLE_HOST_LLAMACPP_API_KEY` | string | — (llama.cpp Bearer auth) |
+| `LAMA_OLE_LLAMACPP_AUTOSTART` | boolean | `--llamacpp-autostart` / `--no-llamacpp-autostart` |
+| `LAMA_OLE_LLAMACPP_BIN` | string | — (llama-server binary path) |
+| `LAMA_OLE_LLAMACPP_MODELS_DIR` | string | — (models dir for the autostarted router) |
+| `LAMA_OLE_LLAMACPP_ARGS` | string | — (extra llama-server args) |
+| `LAMA_OLE_LLAMACPP_STOP_ON_EXIT` | boolean | — (kill autostarted server on exit) |
 | `LAMA_OLE_MODEL` | string | `-m, --model` |
 | `LAMA_OLE_TEMPERATURE` | number | `--temperature` |
 | `LAMA_OLE_NUM_CTX` | integer | `--num_ctx` |
@@ -758,6 +920,9 @@ the configured default.
  | `LAMA_OLE_COLOR_METER_LOW` | color spec | (config-only, no flag) |
  | `LAMA_OLE_COLOR_METER_MID` | color spec | (config-only, no flag) |
  | `LAMA_OLE_COLOR_METER_HIGH` | color spec | (config-only, no flag) |
+| `LAMA_OLE_FORMAT_HISTORY` | line template | (config-only, no flag) — per-view override for `/history` |
+| `LAMA_OLE_FORMAT_REPLAY` | line template | (config-only, no flag) — per-view override for session replay |
+| `LAMA_OLE_FORMAT_OUTPUT` | line template | (config-only, no flag) — per-view override for live `--chat` assistant output |
 
 The `LAMA_OLE_COLOR_*` variables customize the ANSI colors used for the chat
 prompt, your typed input, the thinking stream, the LLM output, and the context

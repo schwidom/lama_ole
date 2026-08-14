@@ -28,12 +28,19 @@ from tool_base import (
     load_tools,
     set_ollama_host,
     set_vision_models,
-    to_ollama_tools,
+    to_openai_tools,
     run_with_tools,
     sanitize_ctx_threshold,
     DEFAULT_CTX_COMPACT_THRESHOLD,
 )
+from backends import (
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_LLAMACPP_HOST,
+    create_router,
+    llamacpp_launcher,
+)
 import color_util
+import history as history_mod
 from chat import (
     ChatState,
     _drop_incomplete_trailing_messages,
@@ -135,6 +142,158 @@ def _env_bool(name, default):
     return default
 
 
+def _deprecated_env(legacy_name, new_name):
+    """Print a migration warning for a still-honored legacy env var."""
+    print(
+        f"Warning: {legacy_name} is deprecated; use {new_name} instead.",
+        file=sys.stderr,
+    )
+
+
+def _ollama_host_env():
+    """Resolve the Ollama host from the environment.
+
+    ``LAMA_OLE_HOST_OLLAMA`` is the canonical variable. The legacy
+    ``LAMA_OLE_HOST`` is still honored so existing configs keep working.
+    """
+    value = os.environ.get("LAMA_OLE_HOST_OLLAMA")
+    if value:
+        return value
+    legacy = os.environ.get("LAMA_OLE_HOST")
+    if legacy:
+        _deprecated_env("LAMA_OLE_HOST", "LAMA_OLE_HOST_OLLAMA")
+        return legacy
+    return DEFAULT_OLLAMA_HOST
+
+
+def _llamacpp_host_env():
+    """Resolve the llama.cpp host from the environment.
+
+    ``LAMA_OLE_HOST_LLAMACPP`` is the canonical variable. The legacy
+    ``LAMA_OLE_LLAMACPP_HOST`` is still honored so existing configs keep
+    working.
+    """
+    value = os.environ.get("LAMA_OLE_HOST_LLAMACPP")
+    if value:
+        return value
+    legacy = os.environ.get("LAMA_OLE_LLAMACPP_HOST")
+    if legacy:
+        _deprecated_env("LAMA_OLE_LLAMACPP_HOST", "LAMA_OLE_HOST_LLAMACPP")
+        return legacy
+    return DEFAULT_LLAMACPP_HOST
+
+
+def _llamacpp_api_key_env():
+    """Resolve the llama.cpp API key (Bearer token) from the environment.
+
+    ``LAMA_OLE_HOST_LLAMACPP_API_KEY`` is the canonical variable. The legacy
+    ``LAMA_OLE_LLAMACPP_API_KEY`` is still honored so existing configs keep
+    working.
+    """
+    value = os.environ.get("LAMA_OLE_HOST_LLAMACPP_API_KEY")
+    if value:
+        return value
+    legacy = os.environ.get("LAMA_OLE_LLAMACPP_API_KEY")
+    if legacy:
+        _deprecated_env("LAMA_OLE_LLAMACPP_API_KEY", "LAMA_OLE_HOST_LLAMACPP_API_KEY")
+        return legacy
+    return None
+
+
+def _llamacpp_bare_model(model_id):
+    """Return the bare llama.cpp model id for an ``llamacpp:`` model, else None.
+
+    Matches the routing prefix in ``backends.names`` exactly (no deprecation
+    warning for unrelated bare names).
+    """
+    if model_id and model_id.startswith("llamacpp:"):
+        return model_id[len("llamacpp:"):]
+    return None
+
+
+def _effective_llamacpp_model(args):
+    """The llama.cpp model to target when autostarting, or None.
+
+    Order: an explicit ``-m llamacpp:...`` wins; otherwise, when resume is on,
+    the most recent session's stored model is used if it is a llama.cpp model —
+    the resumed session overrides the CLI model anyway, so the server must
+    serve whatever the session will use.
+    """
+    bare = _llamacpp_bare_model(args.model)
+    if bare is not None:
+        return bare
+    if args.resume:
+        try:
+            resume = find_recent_session(_default_sessions_dir(), os.getcwd())
+        except Exception:
+            return None
+        if resume:
+            return _llamacpp_bare_model(resume[1].get("model"))
+    return None
+
+
+def _warn_llamacpp_hf_not_served(llamacpp_host, model_id, api_key=None):
+    """Print a stderr notice when the llama.cpp server does not serve an HF id.
+
+    Router mode serves only what the llama.cpp server already has (its cache /
+    models dir), so a missing ``owner/name[:quant]`` id must be downloaded once
+    before it can be used. The check queries the server's own model list, so it
+    never guesses about cache locations.
+    """
+    if not llamacpp_launcher.is_hf_id(model_id):
+        return
+    served = llamacpp_launcher.server_has_model(llamacpp_host, model_id, api_key)
+    if served is not False:  # served, or unreachable (None) — don't guess
+        return
+    print(
+        "[llamacpp] model %r is not served by the llama.cpp server — it will "
+        "not be available until downloaded (run e.g. `llama-server --hf-repo "
+        "%s` once)" % (model_id, model_id),
+        file=sys.stderr,
+    )
+
+
+def _maybe_autostart_llamacpp(args, llamacpp_host):
+    """Start llama-server when autostart applies; return the launch options.
+
+    Returns a dict of the launch-time values honored by the server
+    (``num_ctx``/``num_gpu``/``keep_alive``) when it was started this run, else
+    None. Engages only when autostart is enabled, the invocation is not a
+    query mode, and the host is local — a remote llama.cpp server must never be
+    shadowed by a local spawn. The server always runs in router mode so every
+    cached model is available to ``/model``.
+    """
+    if not args.llamacpp_autostart or (
+        args.list or args.ps or args.stop or args.transfer
+    ):
+        return None
+    if not llamacpp_launcher.is_local_host(llamacpp_host):
+        return None
+    model_id = _effective_llamacpp_model(args)
+    launch_options = {}
+    if args.num_ctx is not None:
+        launch_options["num_ctx"] = args.num_ctx
+    if args.num_gpu is not None:
+        launch_options["num_gpu"] = args.num_gpu
+    launched = llamacpp_launcher.ensure_server(
+        host=llamacpp_host,
+        options=launch_options,
+        keep_alive=args.keep_alive,
+        api_key=_llamacpp_api_key_env(),
+        autostart=args.llamacpp_autostart,
+    )
+    if model_id:
+        _warn_llamacpp_hf_not_served(
+            llamacpp_host, model_id, _llamacpp_api_key_env()
+        )
+    if launched is None:
+        return None
+    launch_values = dict(launch_options)
+    if args.keep_alive is not None:
+        launch_values["keep_alive"] = args.keep_alive
+    return launch_values
+
+
 def _env_choice(name, default, choices):
     value = os.environ.get(name)
     if not value:
@@ -167,10 +326,18 @@ def build_parser():
     )
     # Define arguments
     parser.add_argument(
-        "--host",
+        "--ollama-host", "--host",
+        dest="ollama_host",
         type=str,
-        default=_env_str("LAMA_OLE_HOST", "http://localhost:11434"),
-        help="The host of the ollama instance (e.g. http://localhost:11434)"
+        default=_ollama_host_env(),
+        help="The host of the Ollama instance (e.g. http://localhost:11434)"
+    )
+    parser.add_argument(
+        "--llamacpp-host",
+        dest="llamacpp_host",
+        type=str,
+        default=_llamacpp_host_env(),
+        help="The host of the llama.cpp llama-server (e.g. http://localhost:8080)"
     )
     parser.add_argument(
         "-m", "--model",
@@ -260,6 +427,17 @@ def build_parser():
         type=str,
         default=_env_str("LAMA_OLE_KEEP_ALIVE", None),
         help="Keep model in memory (e.g., '5m', '1h' or a number of seconds)"
+    )
+
+    # Parameter: llama.cpp server autostart
+    parser.add_argument(
+        "--llamacpp-autostart",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("LAMA_OLE_LLAMACPP_AUTOSTART", True),
+        help="Start a llama-server automatically when no llama.cpp server is "
+             "running (models come from the llama.cpp cache or "
+             "LAMA_OLE_LLAMACPP_MODELS_DIR); use --no-llamacpp-autostart to "
+             "disable",
     )
 
     # Parameter: list
@@ -595,45 +773,37 @@ def _default_sessions_dir():
     return base
 
 
-def _prompt_model_choice(cli_model, session_model):
-    """Ask the user which model to keep when CLI and session disagree.
+    """True when two model ids refer to the same backend model.
 
-    Returns one of "session", "cli", or "abort".
+    Bare names and their namespaced form compare equal
+    (``gemma2:2b`` == ``ollama.gemma2:2b``) so resuming an older session does
+    not spuriously prompt for a model choice.
     """
-    while True:
-        print(
-            f"The session uses model '{session_model}' but the CLI set "
-            f"'{cli_model}'.",
-            file=sys.stderr,
-        )
-        ans = input(
-            "Use the (s)ession model, the (c)li model, or (a)bort? [s/c/a]: "
-        ).strip().lower()
-        if ans in ("s", "session", ""):
-            return "session"
-        if ans in ("c", "cli"):
-            return "cli"
-        if ans in ("a", "abort"):
-            return "abort"
-        print("Please answer s, c or a.", file=sys.stderr)
+    if a is None or b is None:
+        return a == b
+    canonicalize = getattr(client, "canonicalize", None)
+    if callable(canonicalize):
+        return canonicalize(a) == canonicalize(b)
+    return a == b
 
 
 def _resume_session_into(state, resume):
     """Restore the most recent session into ``state`` at startup.
 
     If the CLI model differs from the session's model, ask the user which to
-    keep (the session model, the CLI model, or abort). ``args.model`` is not
-    updated for the resumed turns; the chosen model is applied to the state.
+    keep (the session model, the CLI model, or abort). Canonically identical
+    models (e.g. a bare name vs its namespaced form) are adopted silently.
+    ``args.model`` is not updated for the resumed turns; the chosen model is
+    applied to the state.
     """
     path, data = resume
     session_model = data.get("model")
     cli_model = state.model
-    if cli_model and session_model and cli_model != session_model:
-        choice = _prompt_model_choice(cli_model, session_model)
-        if choice == "abort":
-            sys.exit(0)
-        if choice == "cli":
-            data["model"] = cli_model
+    if cli_model and session_model:
+        # Session model always wins
+        data["model"] = session_model
+    elif cli_model:
+        data["model"] = cli_model
     apply_session(state, data, source=path)
     title = data.get("title") or "(untitled)"
     n = len(state.messages)
@@ -659,13 +829,28 @@ def main():
         meter_high=_env_str("LAMA_OLE_COLOR_METER_HIGH", None),
     )
 
-    host_url = args.host
-    if not host_url.startswith(('http://', 'https://')) and ':' in host_url:
-        host_url = f"http://{host_url}"
-    client = Client(host=host_url)
+    ollama_host = _normalize_host_with_default(args.ollama_host, 11434)
+    llamacpp_host = _normalize_host_with_default(args.llamacpp_host, 8080)
+
+    # Auto-start the llama.cpp server when needed (and honor its launch-time
+    # options). Runs before create_router() so the router's first list() — the
+    # source for /model completion — already sees the server. When a server we
+    # autostarted earlier is still running, recognize it from the state marker
+    # so the "ignored option" warnings stay quiet for matching requests.
+    launch_values = _maybe_autostart_llamacpp(args, llamacpp_host)
+    if launch_values is None:
+        launch_values = llamacpp_launcher.launched_server_values(llamacpp_host)
+
+    client = create_router(
+        ollama_host=ollama_host,
+        llamacpp_host=llamacpp_host,
+        api_key=_llamacpp_api_key_env(),
+        llamacpp_launched=launch_values is not None,
+        llamacpp_launch_values=launch_values,
+    )
 
     # Propagate host and vision models to tools
-    set_ollama_host(host_url)
+    set_ollama_host(ollama_host)
     if args.vision_models:
         set_vision_models(args.vision_models)
 
@@ -675,24 +860,31 @@ def main():
         sys.exit(0)
 
     if args.list:
-        print( "available models:")
+        print("available models:")
         response = client.list()
-        for model in response.models:
-            print(model)
+        for entry in response.models:
+            print(entry.model)
 
     if args.ps:
-        print( "running models:")
+        print("running models:")
         response = client.ps()
-        for model in response.models:
-            print(model)
+        for entry in response.models:
+            print(entry.model)
 
 
     if args.list or args.ps:
      sys.exit(0)
 
     if args.stop:
-        client.generate(model=args.stop, keep_alive=0)
-        print(f"Stopped model: {args.stop}")
+        stopped = client.stop(args.stop)
+        if stopped:
+            print(f"Stopped model: {args.stop}")
+        else:
+            print(
+                f"Model {args.stop} is managed by the llama.cpp server; "
+                "nothing to unload.",
+                file=sys.stderr,
+            )
         sys.exit(0)
 
     if args.transfer:
@@ -731,17 +923,21 @@ def main():
             except Exception as e:
                 print(f"Error loading tool module '{module_name}': {e}", file=sys.stderr)
                 sys.exit(1)
-    ollama_tools = to_ollama_tools(loaded_tools) if loaded_tools else None
+    ollama_tools = to_openai_tools(loaded_tools) if loaded_tools else None
 
     if args.debug:
         import code
-        print(f"Debug mode: model={args.model}, host={host_url}")
+        print(
+            f"Debug mode: model={args.model}, "
+            f"ollama={ollama_host}, llamacpp={llamacpp_host}"
+        )
         local_vars = {
             'client': client,
             'loaded_tools': loaded_tools,
             'ollama_tools': ollama_tools,
             'args': args,
-            'host_url': host_url,
+            'ollama_host': ollama_host,
+            'llamacpp_host': llamacpp_host,
             'sys': sys,
             'os': os,
         }
@@ -773,9 +969,32 @@ def main():
                 print(f"    {t.name}({sig}) — {t.description}")
         sys.exit(0)
 
-    if not args.model :
-        print( "Error: model has to be set (parameter -m , --model)", file=sys.stderr)
-        sys.exit(1)
+    if not args.model:
+        default_model = client.resolve_default_model()
+        if default_model:
+            args.model = default_model
+            print(f"Using llama.cpp model: {args.model}", file=sys.stderr)
+        else:
+            try:
+                resp = client.list()
+                candidates = [entry.model for entry in resp.models]
+            except Exception:
+                candidates = []
+            if candidates:
+                print(
+                    "Error: model has to be set (parameter -m, --model). "
+                    "Available models: " + ", ".join(candidates),
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Error: model has to be set (parameter -m, --model) and no "
+                    "reachable backend is serving models.",
+                    file=sys.stderr,
+                )
+            sys.exit(1)
+
+    args.model = client.canonicalize(args.model)
 
     # Determine initial content (optional in chat mode)
     content = ""
@@ -900,10 +1119,42 @@ def main():
                 ctx_compact_threshold=args.auto_compact_threshold,
                 ctx_compact_model=args.auto_compact_model,
             )
+
+            def ensure_llamacpp(model_id):
+                """Lazily start llama-server for the active llama.cpp model.
+
+                No-op when autostart is off, the model is not a llama.cpp
+                model, the host is remote (a local spawn would shadow it), or
+                a server already answers there. The server always runs in
+                router mode; a targeted HF model is checked against the cache
+                and a notice is printed when it is missing. On success the
+                router's client is marked launched so the ignored-option
+                warnings stay silent.
+                """
+                bare = _llamacpp_bare_model(model_id)
+                if not args.llamacpp_autostart or bare is None:
+                    return
+                if not llamacpp_launcher.is_local_host(llamacpp_host):
+                    return
+                launched = llamacpp_launcher.ensure_server(
+                    host=llamacpp_host,
+                    options=state.options,
+                    keep_alive=state.keep_alive,
+                    api_key=_llamacpp_api_key_env(),
+                    autostart=args.llamacpp_autostart,
+                )
+                _warn_llamacpp_hf_not_served(
+                    llamacpp_host, bare, _llamacpp_api_key_env()
+                )
+                if launched is not None:
+                    client.mark_llamacpp_launched(state.options, state.keep_alive)
+
+            state.ensure_llamacpp = ensure_llamacpp
             if args.resume:
                 resume = find_recent_session(sessions_dir, os.getcwd())
                 if resume:
                     _resume_session_into(state, resume)
+                ensure_llamacpp(state.model)
             if not state.session_id:
                 state.session_id = new_session_id()
                 state.session_created_at = time.time()
@@ -941,6 +1192,7 @@ def main():
                         color=args.color,
                         state_manager=state.state_manager,
                         metrics=metrics,
+                        output_format=history_mod.parse_output_format(),
                     )
                     state.ctx_usage = metrics
                     state.ctx_usage_model = args.model
@@ -1017,12 +1269,16 @@ def main():
 # ---------------------------------------------------------------------------
 
 
-def _normalize_host(host):
+def _normalize_host_with_default(host, default_port):
     if not host.startswith(("http://", "https://")):
         host = f"http://{host}"
     if ":" not in host.split("/")[-1]:
-        host = f"{host}:11434"
+        host = f"{host}:{default_port}"
     return host
+
+
+def _normalize_host(host):
+    return _normalize_host_with_default(host, 11434)
 
 
 def _find_models_dir():

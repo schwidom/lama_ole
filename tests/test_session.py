@@ -38,6 +38,31 @@ def _load_cli_module():
 
 CLI = _load_cli_module()
 
+# Keep LAMA_OLE_FORMAT_{HISTORY,REPLAY,OUTPUT} out of this module's tests under
+# both pytest and `unittest discover`: history/replay rendering reads them at
+# call time, so a
+# developer's shell exports would silently change the expected output. The
+# vars are saved before the module runs and restored afterwards.
+_FORMAT_ENV_VARS = (
+    "LAMA_OLE_FORMAT_HISTORY",
+    "LAMA_OLE_FORMAT_REPLAY",
+    "LAMA_OLE_FORMAT_OUTPUT",
+)
+_FORMAT_ENV_BACKUP = {}
+
+
+def setUpModule():
+    global _FORMAT_ENV_BACKUP
+    _FORMAT_ENV_BACKUP = {v: os.environ[v] for v in _FORMAT_ENV_VARS if v in os.environ}
+    for v in _FORMAT_ENV_VARS:
+        os.environ.pop(v, None)
+
+
+def tearDownModule():
+    for v in _FORMAT_ENV_VARS:
+        os.environ.pop(v, None)
+    os.environ.update(_FORMAT_ENV_BACKUP)
+
 
 def _make_state(**kwargs):
     kwargs.setdefault("client", None)
@@ -102,28 +127,29 @@ class SessionSerializeTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertNotIn("secret system prompt", out)
         self.assertNotIn("inner monologue", out)
-        self.assertIn(">>> hi\n", out)
-        self.assertIn("hello there\n", out)
-        self.assertIn("it is sunny\n", out)
         self.assertNotIn("[tool:", out)
         self.assertNotIn("[tool result:", out)
+        # Replay is a numbered /history listing (tool result hidden by default).
+        self.assertIn("[1] You: hi\n", out)
+        self.assertIn("[2] Me: hello there", out)
+        self.assertIn("[3] tools: [data from get_weather", out)
+        self.assertIn("[5] Me: it is sunny", out)
 
-    def test_replay_history_shows_thinking_when_enabled(self):
-        state = _make_state(show_thinking=True)
+    def test_replay_history_shows_stored_thinking(self):
+        state = _make_state()
         state.messages = [
             {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "answer", "thinking": "hmm"},
+            {"role": "assistant", "content": {"thinking": "hmm"}},
         ]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             chat._replay_history(state, use_color=True)
         out = buf.getvalue()
-        self.assertIn("hmm", out)
-        self.assertIn("answer", out)
+        self.assertIn("thinking: hmm", out)
         self.assertIn("\x01\033[", out)
 
-    def test_replay_history_verbose_shows_tool_markers(self):
-        state = _make_state(verbose=1)
+    def test_replay_history_tool_entries_via_template(self):
+        state = _make_state()
         state.messages = [
             {
                 "role": "assistant",
@@ -134,12 +160,18 @@ class SessionSerializeTest(unittest.TestCase):
             },
             {"role": "tool", "content": "[data from ...]", "tool_name": "get_weather"},
         ]
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            chat._replay_history(state, use_color=False)
+        env = {
+            "LAMA_OLE_FORMAT_HISTORY": "",
+            "LAMA_OLE_FORMAT_REPLAY": "tool_result=[{num}] {role}: {text}",
+            "LAMA_OLE_FORMAT_OUTPUT": "",
+        }
+        with patch.dict(os.environ, env):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                chat._replay_history(state, use_color=False)
         out = buf.getvalue()
-        self.assertIn("[tool: get_weather(city='Berlin')]", out)
-        self.assertIn("[tool result: get_weather]", out)
+        self.assertIn("[1] tools: [data from get_weather", out)
+        self.assertIn("[2] tool result: [data from ...]", out)
 
     def test_replay_history_colored(self):
         state = _make_state()
@@ -177,7 +209,10 @@ class SessionSerializeTest(unittest.TestCase):
     def test_apply_session_ignores_unknown_keys(self):
         state = _make_state()
         chat.apply_session(state, {"messages": [{"role": "user", "content": "hi"}], "future": 1})
-        self.assertEqual(state.messages, [{"role": "user", "content": "hi"}])
+        self.assertEqual([m["role"] for m in state.messages], ["user"])
+        self.assertEqual(state.messages[0]["content"], "hi")
+        # Restored messages are stamped so /history renders uniformly.
+        self.assertIn("timestamp", state.messages[0])
 
     def test_round_trip(self):
         state = _make_state()
@@ -195,7 +230,12 @@ class SessionSerializeTest(unittest.TestCase):
         self.assertEqual(state2.system_prompt, "SP")
         self.assertEqual(state2.session_id, "abc")
         self.assertEqual(state2.session_created_at, 1.0)
-        self.assertEqual(state2.messages, state.messages)
+        # Restored messages are stamped; roles and contents are unchanged.
+        self.assertEqual(
+            [(m["role"], m["content"]) for m in state2.messages],
+            [(m["role"], m["content"]) for m in state.messages],
+        )
+        self.assertTrue(all("timestamp" in m for m in state2.messages))
 
     def test_round_trip_preserves_thinking(self):
         state = _make_state()
@@ -215,6 +255,30 @@ class SessionStoreTest(unittest.TestCase):
         self._cwd = os.getcwd()
         os.chdir(self._tmp)
         self.sessions_dir = os.path.join(self._tmp, "sessions")
+
+    def _write_session(self, sid, cwd=None, updated=None, content="hi"):
+        """Write a session file for ``sid``, optionally in another cwd."""
+        cwd = cwd or os.getcwd()
+        state = _make_state(sessions_dir=self.sessions_dir, session_id=sid)
+        state.messages = [{"role": "user", "content": content}]
+        data = chat.serialize_session(
+            state, session_id=sid, cwd=cwd, created_at=updated or time.time()
+        )
+        if updated is not None:
+            data["updated_at"] = updated
+        dirpath = chat.session_dir_for(cwd, self.sessions_dir)
+        os.makedirs(dirpath, exist_ok=True)
+        path = os.path.join(dirpath, sid + ".json")
+        chat._write_session_file(path, data)
+        return path
+
+    def _sessions_output(self, arg="", state=None):
+        if state is None:
+            state = _make_state(sessions_dir=self.sessions_dir)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            chat._cmd_sessions(arg, state)
+        return buf.getvalue()
 
     def tearDown(self):
         os.chdir(self._cwd)
@@ -301,7 +365,7 @@ class SessionStoreTest(unittest.TestCase):
         state2 = _make_state(sessions_dir=self.sessions_dir)
         chat._cmd_resume("s1", state2)
         self.assertEqual(state2.session_id, "s1")
-        self.assertEqual(state2.messages, [{"role": "user", "content": "hi"}])
+        self.assertEqual([(m["role"], m["content"]) for m in state2.messages], [("user", "hi")])
         self.assertTrue(os.path.isfile(self._session_path("s1")))
         self.assertFalse(os.path.exists(old_path))
 
@@ -323,17 +387,150 @@ class SessionStoreTest(unittest.TestCase):
             chat._cmd_resume("nope", state2)
         self.assertIn("No session matching", buf.getvalue())
 
-    def test_sessions_lists(self):
-        state = _make_state(sessions_dir=self.sessions_dir, session_id="s1")
-        state.messages = [{"role": "user", "content": "hi"}]
-        chat.autosave_session(state)
+    def test_resume_annotated_needle_strips_marker(self):
+        self._write_session("s1", cwd="/other/proj")
         state2 = _make_state(sessions_dir=self.sessions_dir)
+        annotated = f"s1  {chat._RESUME_ANNOTATION_MARKER}  /other/proj"
+        chat._cmd_resume(annotated, state2)
+        self.assertEqual(state2.session_id, "s1")
+
+    def test_sessions_lists(self):
+        self._write_session("s1")
+        out = self._sessions_output("")
+        self.assertIn("s1", out)
+        self.assertIn("Sessions in", out)
+        self.assertIn("newest first", out)
+        self.assertIn("1 session(s) stored in", out)
+
+    def test_sessions_default_hides_other_dirs(self):
+        self._write_session("s1")
+        self._write_session("s2", cwd="/other/proj")
+        out = self._sessions_output("")
+        self.assertIn("s1", out)
+        self.assertNotIn("s2", out)
+        self.assertNotIn("Other projects", out)
+
+    def test_sessions_all_reveals_other_dirs_grouped(self):
+        self._write_session("s1")
+        self._write_session("s2", cwd="/other/proj")
+        out = self._sessions_output("all")
+        self.assertIn("s1", out)
+        self.assertIn("s2", out)
+        self.assertIn("Other projects:", out)
+        self.assertIn("/other/proj:", out)
+        self.assertIn("2 session(s) stored in", out)
+
+    def test_sessions_oldest_first_numbering_newest_on_top(self):
+        self._write_session("old", updated=1000, content="alpha session")
+        self._write_session("new", updated=2000, content="beta session")
+        out = self._sessions_output("")
+        lines = out.splitlines()
+        beta_line = next(l for l in lines if "beta session" in l)
+        alpha_line = next(l for l in lines if "alpha session" in l)
+        self.assertLess(lines.index(beta_line), lines.index(alpha_line))
+        self.assertIn("1.", alpha_line)
+        self.assertIn("2.", beta_line)
+
+    def test_sessions_active_marker_and_footer(self):
+        path = self._write_session("s1")
+        state = _make_state(sessions_dir=self.sessions_dir, session_id="s1")
+        out = self._sessions_output("", state=state)
+        self.assertIn("* 1.", out)
+        self.assertIn(
+            "current session file: " + os.path.relpath(path, self.sessions_dir),
+            out,
+        )
+
+    def test_sessions_footer_omitted_when_active_unsaved(self):
+        self._write_session("s1")
+        state = _make_state(sessions_dir=self.sessions_dir, session_id="ghost")
+        out = self._sessions_output("", state=state)
+        self.assertNotIn("current session file:", out)
+
+    def test_sessions_unknown_arg_usage(self):
+        self._write_session("s1")
+        out = self._sessions_output("bogus")
+        self.assertIn("Usage: /sessions", out)
+
+    def test_sessions_empty_dir_message(self):
+        out = self._sessions_output("")
+        self.assertIn(f"No saved sessions in {self.sessions_dir}.", out)
+        out_all = self._sessions_output("all")
+        self.assertIn(f"No saved sessions in {self.sessions_dir}.", out_all)
+
+    def test_sessions_empty_current_dir_points_to_all(self):
+        self._write_session("s1", cwd="/other/proj")
+        out = self._sessions_output("")
+        self.assertIn("No sessions saved in", out)
+        self.assertIn("1 session(s) found in other projects", out)
+        self.assertIn("/sessions all", out)
+
+    def test_sessions_rm_by_number(self):
+        self._write_session("s1", updated=1000)
+        self._write_session("s2", updated=2000)
+        self._write_session("s3", updated=3000)
+        with patch("builtins.input", return_value="y"):
+            chat._cmd_sessions("rm 2", _make_state(sessions_dir=self.sessions_dir))
+        self.assertTrue(os.path.isfile(self._session_path("s1")))
+        self.assertFalse(os.path.isfile(self._session_path("s2")))
+        self.assertTrue(os.path.isfile(self._session_path("s3")))
+
+    def test_sessions_rm_range(self):
+        self._write_session("s1", updated=1000)
+        self._write_session("s2", updated=2000)
+        self._write_session("s3", updated=3000)
+        with patch("builtins.input", return_value="y"):
+            chat._cmd_sessions("rm 1..2", _make_state(sessions_dir=self.sessions_dir))
+        self.assertFalse(os.path.isfile(self._session_path("s1")))
+        self.assertFalse(os.path.isfile(self._session_path("s2")))
+        self.assertTrue(os.path.isfile(self._session_path("s3")))
+
+    def test_sessions_rm_recent(self):
+        self._write_session("s1", updated=1000)
+        self._write_session("s2", updated=2000)
+        with patch("builtins.input", return_value="y"):
+            chat._cmd_sessions("rm -1", _make_state(sessions_dir=self.sessions_dir))
+        self.assertTrue(os.path.isfile(self._session_path("s1")))
+        self.assertFalse(os.path.isfile(self._session_path("s2")))
+
+    def test_sessions_rm_all(self):
+        self._write_session("s1")
+        self._write_session("s2", cwd="/other/proj")
+        with patch("builtins.input", return_value="y"):
+            chat._cmd_sessions("rm all", _make_state(sessions_dir=self.sessions_dir))
+        self.assertFalse(os.path.isfile(self._session_path("s1")))
+        self.assertFalse(
+            os.path.isfile(chat.session_dir_for("/other/proj", self.sessions_dir) + "/s2.json")
+        )
+
+    def test_sessions_rm_cancelled(self):
+        self._write_session("s1")
+        self._write_session("s2")
+        with patch("builtins.input", return_value="n"):
+            chat._cmd_sessions("rm 1", _make_state(sessions_dir=self.sessions_dir))
+        self.assertTrue(os.path.isfile(self._session_path("s1")))
+        self.assertTrue(os.path.isfile(self._session_path("s2")))
+
+    def test_sessions_rm_invalid(self):
+        self._write_session("s1")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            chat._cmd_sessions("", state2)
-        out = buf.getvalue()
-        self.assertIn("s1", out)
-        self.assertIn("session(s) stored in", out)
+            with patch("builtins.input", return_value="y"):
+                chat._cmd_sessions("rm bogus", _make_state(sessions_dir=self.sessions_dir))
+        self.assertIn("Usage: /sessions rm", buf.getvalue())
+        self.assertTrue(os.path.isfile(self._session_path("s1")))
+
+    def test_sessions_rm_prompt_cancels(self):
+        self._write_session("s1")
+        state = _make_state(sessions_dir=self.sessions_dir)
+        with patch("builtins.input", side_effect=["", "y"]):
+            chat._cmd_sessions("rm", state)
+        self.assertTrue(os.path.isfile(self._session_path("s1")))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with patch("builtins.input", side_effect=["1", "y"]):
+                chat._cmd_sessions("rm", state)
+        self.assertFalse(os.path.isfile(self._session_path("s1")))
 
     def test_new_archives_and_starts_fresh(self):
         state = _make_state(sessions_dir=self.sessions_dir, session_id="s1")
@@ -520,6 +717,79 @@ class SessionsDirTest(unittest.TestCase):
                 os.environ.pop("LAMA_OLE_AUTOSAVE", None)
             else:
                 os.environ["LAMA_OLE_AUTOSAVE"] = old_a
+
+
+class MutationPersistenceTest(unittest.TestCase):
+    """Every history/config mutation must persist to the session file at once.
+
+    This keeps the on-disk session and the live ``state.messages`` from
+    diverging (history editing and session persistence stay homogenized).
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._cwd = os.getcwd()
+        os.chdir(self._tmp)
+        self.sessions_dir = os.path.join(self._tmp, "sessions")
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _state(self, **kwargs):
+        kwargs.setdefault("client", None)
+        kwargs.setdefault("model", "m")
+        kwargs.setdefault("sessions_dir", self.sessions_dir)
+        kwargs.setdefault("session_id", "s1")
+        return chat.ChatState(**kwargs)
+
+    def _path(self):
+        return os.path.join(chat.session_dir_for(os.getcwd(), self.sessions_dir), "s1.json")
+
+    def _data(self):
+        with open(self._path(), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_cut_persists_immediately(self):
+        state = self._state()
+        state.messages = [
+            {"role": "user", "content": "keep me"},
+            {"role": "user", "content": "drop me"},
+        ]
+        chat.autosave_session(state)
+        # /cut keeps from entry 2 to the end -> the older "keep me" is removed.
+        chat._cmd_cut("2", state)
+        self.assertEqual(
+            [m["content"] for m in self._data()["messages"]], ["drop me"]
+        )
+
+    def test_cut_undo_persists(self):
+        state = self._state()
+        state.messages = [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
+        chat._cmd_cut("2", state)
+        chat._cmd_cut("undo", state)
+        self.assertEqual(
+            [m["content"] for m in self._data()["messages"]], ["a", "b"]
+        )
+
+    def test_model_switch_persists(self):
+        state = self._state()
+        state.messages = [{"role": "user", "content": "hi"}]
+        chat.autosave_session(state)
+        chat._handle_command("/model other-model", state)
+        self.assertEqual(self._data()["model"], "other-model")
+
+    def test_systemprompt_persists(self):
+        state = self._state()
+        state.messages = [{"role": "user", "content": "hi"}]
+        chat.autosave_session(state)
+        sp_file = os.path.join(self._tmp, "prompt.txt")
+        with open(sp_file, "w", encoding="utf-8") as f:
+            f.write("you are a terse assistant")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            chat._cmd_systemprompt(sp_file, state)
+        self.assertEqual(self._data()["system_prompt"], "you are a terse assistant")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from tool_base import (
     get_available_toolsets,
     get_tools_of_module,
     peek_tools_of_module,
+    module_file_has_tools,
 )
 from tool_base.compaction import (
     COMPACTION_SYSTEM_PROMPT,
@@ -43,6 +44,7 @@ from tool_base.logging import StateLogger
 from tool_base.engine import _print_diff_block
 
 import color_util
+import history as history_mod
 
 
 @dataclass
@@ -89,6 +91,9 @@ class ChatState:
     ctx_compact: bool = False
     ctx_compact_threshold: float = DEFAULT_CTX_COMPACT_THRESHOLD
     ctx_compact_model: str = None
+    loaded_model: str = None
+    model_backend: str = "ollama"
+    ensure_llamacpp: callable = None
     stats_by_model: dict = field(default_factory=dict)
     _hotkey_listener: object = None
     _last_cut_messages: list = field(default_factory=list)
@@ -153,7 +158,7 @@ class ChatState:
         self.messages.insert(0, {"role": "system", "content": new_content})
 
     def refresh_ollama_tools(self) -> None:
-        """Recompute the Ollama tool list from ``loaded_tools``.
+        """Recompute the backend tool list from ``loaded_tools``.
 
         Called after every runtime load/unload so the next turn advertises
         exactly the current set of tools. The full set is advertised in both
@@ -161,39 +166,24 @@ class ChatState:
         (see the engine's plan-mode gate), so the model always knows which
         tools exist and will work once build mode is active.
         """
-        self.ollama_tools = to_ollama_tools(self.loaded_tools) if self.loaded_tools else None
+        if not self.loaded_tools:
+            self.ollama_tools = None
+            return
+        make_tools = getattr(self.client, "make_tools", None)
+        if callable(make_tools):
+            self.ollama_tools = make_tools(self.loaded_tools)
+        else:
+            self.ollama_tools = to_ollama_tools(self.loaded_tools)
 
     def get_history_entries(self):
-        """Returns a list of viewable history entries with numbering and type info."""
-        M = len(self.messages)
-        entries = []
-        for i, msg in enumerate(self.messages):
-            # Numbering: Index 0 -> M, Index M-1 -> 1
-            num = M - i
-            role = msg.get("role")
-            content = msg.get("content", "")
+        """Returns a list of viewable history entries with numbering and type info.
 
-            if role == "user":
-                entries.append({"num": num, "type": "user", "msg": msg})
-            elif role == "system":
-                # System messages are usually not part of the visible history in REPL
-                continue
-            elif role == "assistant":
-                # Check for thinking process (Ollama format)
-                if isinstance(content, dict) and "thinking" in content:
-                    entries.append({"num": num, "type": "thinking", "msg": msg})
-                elif isinstance(content, str) and "thought:" in content: # fallback if not structured
-                     entries.append({"num": num, "type": "thinking", "msg": msg})
-                else:
-                    # Check for tool calls
-                    if "tool_calls" in msg or (isinstance(content, dict) and "tool_calls" in content):
-                        entries.append({"num": num, "type": "toolcall", "msg": msg})
-                    else:
-                        entries.append({"num": num, "type": "output", "msg": msg})
-            elif role == "tool":
-                entries.append({"num": num, "type": "tool_result", "msg": msg})
-
-        return entries
+        Delegates to :mod:`history`, the shared model also used by /cut and
+        session replay. Entries are numbered 1 (oldest) .. V (newest) over
+        non-system messages, so the numbers shown by /history are exactly the
+        ones /cut accepts.
+        """
+        return history_mod.history_entries(self.messages)
 
     def undo_cut(self):
         """Restores the messages removed by the last /cut command."""
@@ -300,38 +290,11 @@ def _bind_mode_toggle(state: ChatState) -> None:
         pass
 
 
-_COMMANDS = [
-    "/feed",
-    "/new",
-    "/compact",
-    "/model",
-    "/plan",
-    "/build",
-    "/save",
-    "/load",
-    "/resume",
-    "/sessions",
-    "/stats",
-    "/rename",
-    "/tools",
-    "/skill",
-    "/systemprompt",
-    "/context",
-    "/history",
-    "/cut",
-    "/help",
-    "/exit",
-    "/quit",
-]
-
-_COMMAND_SUBCOMMANDS = {
-    "/compact": ["auto"],
-    "/tools": ["loaded", "available", "show", "all", "load", "unload"],
-    "/skill": ["list", "load", "unload", "show"],
-    "/systemprompt": ["show", "unset"],
-}
-
 _PATH_COMMANDS = {"/feed", "/save", "/load"}
+
+# _COMMANDS and _COMMAND_SUBCOMMANDS are derived from the data-driven
+# dispatch tables at the bottom of this module (single source of truth for
+# both /handle_command dispatch and Tab completion).
 
 
 def _complete_file_path(partial: str) -> list:
@@ -359,12 +322,291 @@ def _complete_file_path(partial: str) -> list:
     return matches
 
 
-def _completion_candidates(buffer: str) -> list:
+def _path_is_within_directory(path: str, directory: str) -> bool:
+    """Return True when ``path`` resolves inside ``directory``."""
+    try:
+        path_real = os.path.realpath(path)
+        directory_real = os.path.realpath(directory)
+        return os.path.commonpath([path_real, directory_real]) == directory_real
+    except (OSError, ValueError):
+        return False
+
+
+def _toolset_segment_dir(tools_dir: str, seg: str):
+    """Resolve a leading dotted segment of a module path to a package directory.
+
+    ``tools`` maps to the tools directory itself. Any other segment resolves to
+    a subpackage inside ``tools/`` (``tools_dir/<seg>``). Returns
+    ``(abs_dir, module_prefix)`` or ``(None, None)``.
+    """
+    if seg == "tools":
+        return tools_dir, "tools"
+    if not tools_dir:
+        return None, None
+    sub = os.path.join(tools_dir, seg)
+    if os.path.isdir(sub) and os.path.isfile(os.path.join(sub, "__init__.py")):
+        return sub, f"tools.{seg}"
+    return None, None
+
+
+def _complete_toolset_module(partial: str, tools_dir: str = None) -> list:
+    """Completion candidates for a /tools load argument.
+
+    Bare names complete against the tools package (only modules that are real
+    tool modules). Dotted names descend into package directories: the first
+    segment resolves to a physical package dir inside the tools tree and each
+    following segment walks into a subpackage. Leaf modules are offered only
+    when they are tool modules (they import ``@tool`` from ``tool_base``);
+    package dirs are always offered with a trailing dot so Tab keeps descending
+    into them.
+    """
+    if tools_dir is None:
+        from tool_base.registry import _TOOLS_PACKAGE_DIR
+        tools_dir = _TOOLS_PACKAGE_DIR
+
+    if "." not in partial:
+        names = get_available_toolsets(tools_dir, only_tool_modules=True)
+        return [n for n in names if n.startswith(partial)]
+
+    segments = partial.split(".")
+    pkg_dir, prefix = _toolset_segment_dir(tools_dir, segments[0])
+    if pkg_dir is None:
+        return []
+    for seg in segments[1:-1]:
+        pkg_dir = os.path.join(pkg_dir, seg)
+        if not (
+            os.path.isdir(pkg_dir)
+            and os.path.isfile(os.path.join(pkg_dir, "__init__.py"))
+        ):
+            return []
+        prefix = f"{prefix}.{seg}"
+    last = segments[-1]
+    try:
+        entries = sorted(os.listdir(pkg_dir))
+    except OSError:
+        return []
+    out = []
+    for name in entries:
+        if not name.startswith(last):
+            continue
+        full = os.path.join(pkg_dir, name)
+        if (
+            os.path.isfile(full)
+            and name.endswith(".py")
+            and not name.startswith("_")
+            and name != "__init__.py"
+        ):
+            if module_file_has_tools(full):
+                out.append(f"{prefix}.{name[:-3]}")
+        elif os.path.isdir(full) and os.path.isfile(
+            os.path.join(full, "__init__.py")
+        ):
+            out.append(f"{prefix}.{name}.")
+    return out
+
+
+_RESUME_ANNOTATION_MARKER = "→"
+
+
+def _session_completion_candidates(sessions_dir: str, partial: str) -> list:
+    """Completion candidates for /resume: session titles and 8-char ids.
+
+    Current-cwd sessions come first as plain titles; sessions from other
+    projects follow, annotated with their recorded project path so the two
+    groups stay visually distinct in the match list. _cmd_resume strips the
+    annotation marker before matching, so selecting an annotated candidate
+    still resolves.
+    """
+    if not sessions_dir:
+        return []
+    current = os.path.normpath(os.getcwd())
+    current_hits = []
+    others = {}
+    for path, data in _list_session_files(sessions_dir):
+        title = (data.get("title") or "").strip()
+        sid = (data.get("session_id") or "").strip()
+        parts = [title] if title else []
+        if sid:
+            parts.append(sid[:8])
+        hits = [p for p in parts if p.lower().startswith(partial.lower())]
+        if not hits:
+            continue
+        cwd = os.path.normpath(data.get("cwd") or "")
+        if cwd == current:
+            current_hits.extend(hits)
+        else:
+            others.setdefault(cwd, []).extend(hits)
+    out = []
+    seen = set()
+    for cand in sorted(set(current_hits)):
+        seen.add(cand)
+        out.append(cand)
+    for cwd in sorted(others):
+        for cand in sorted(set(others[cwd])):
+            annotated = f"{cand}  {_RESUME_ANNOTATION_MARKER}  {cwd}"
+            if annotated not in seen and cand not in seen:
+                seen.add(annotated)
+                out.append(annotated)
+    return out
+
+
+_MODEL_LIST_TTL = 60.0
+
+
+def _make_model_lister(state: ChatState) -> callable:
+    """Return a model-listing callable for the completion closure.
+
+    ``client.list()`` is a network round-trip to Ollama, so the result is
+    cached for a short TTL. The cache is only marked fresh on success: a
+    transient failure returns the stale list (or ``[]``) and retries on the
+    next Tab.
+    """
+    cache = {"ts": 0.0, "loaded": False, "names": []}
+    client = getattr(state, "client", None)
+
+    def lister():
+        if client is None:
+            return []
+        now = time.time()
+        if cache["loaded"] and now - cache["ts"] < _MODEL_LIST_TTL:
+            return cache["names"]
+        try:
+            resp = client.list()
+            names = sorted(
+                {
+                    getattr(m, "model", None) or getattr(m, "name", None)
+                    for m in getattr(resp, "models", []) or []
+                }
+            )
+            names = [n for n in names if n]
+        except Exception:
+            return cache["names"]
+        cache["ts"] = now
+        cache["loaded"] = True
+        cache["names"] = names
+        return names
+
+    return lister
+
+
+def _model_completion_candidates(list_models: callable, partial: str) -> list:
+    """Completion candidates for /model: installed model names, prefix-sorted."""
+    if list_models is None:
+        return []
+    try:
+        names = sorted(set(list_models()))
+    except Exception:
+        return []
+    return [n for n in names if n.startswith(partial)]
+
+
+_SKILL_FILE_EXTENSIONS = (".md", ".txt")
+
+
+def _complete_skill_path(partial: str, skills_dir: str) -> list:
+    """Completion candidates for a path rooted inside the skills directory."""
+    if skills_dir is None:
+        skills_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+    partial = os.path.expanduser(partial)
+    dirname, basename = os.path.split(partial)
+    if dirname == "":
+        return []
+    search_dir = dirname if os.path.isabs(partial) else os.path.join(skills_dir, dirname)
+    try:
+        entries = sorted(os.listdir(search_dir))
+    except OSError:
+        return []
+    display_dir = dirname if dirname not in ("", ".") else ""
+    out = []
+    for name in entries:
+        if not name.startswith(basename):
+            continue
+        full = os.path.join(search_dir, name)
+        if not _path_is_within_directory(full, skills_dir):
+            continue
+        if os.path.isdir(full):
+            candidate = os.path.join(display_dir, name) if display_dir else name
+            out.append(candidate + os.sep)
+        elif (
+            os.path.isfile(full)
+            and name.endswith(_SKILL_FILE_EXTENSIONS)
+            and not name.startswith("_")
+        ):
+            candidate = os.path.join(display_dir, name) if display_dir else name
+            out.append(candidate)
+    return out
+
+
+def _skill_load_completion_candidates(skills_dir: str, partial: str) -> list:
+    """Completion candidates for /skill load: skill names or rooted paths.
+
+    Skill files are offered by their stem (``code-reviewer.md`` →
+    ``code-reviewer``) because ``_resolve_skill_path`` accepts the bare name.
+    If the partial contains a path separator, completion stays rooted in the
+    skills directory so Tab does not leak unrelated cwd files into the picker.
+    """
+    out = []
+    if skills_dir is None:
+        skills_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+    if os.sep in partial or (os.altsep and os.altsep in partial):
+        return _complete_skill_path(partial, skills_dir)
+    if os.path.isdir(skills_dir):
+        for name in sorted(os.listdir(skills_dir)):
+            if not name.endswith(_SKILL_FILE_EXTENSIONS) or name.startswith("_"):
+                continue
+            stem = os.path.splitext(name)[0]
+            if stem.startswith(partial):
+                out.append(stem)
+    return out
+
+
+def _sessions_rm_completion_candidates(sessions_dir: str, partial: str) -> list:
+    """Completion candidates for /sessions rm: 'all' and valid session numbers.
+
+    Numbers follow the /sessions numbering (1 = oldest across all projects),
+    matching what /sessions rm resolves against.
+    """
+    if not sessions_dir:
+        return []
+    count = len(_list_session_files(sessions_dir))
+    candidates = ["all"] + [str(i) for i in range(1, count + 1)]
+    return [c for c in candidates if c.startswith(partial)]
+
+
+def _session_id_prefix_completion_candidates(sessions_dir: str, partial: str) -> list:
+    """Completion candidates for the /rename <id-prefix> form.
+
+    Returns 8-char session-id prefixes matching the typed prefix, mirroring the
+    id lookup in _cmd_rename.
+    """
+    if not sessions_dir:
+        return []
+    out = set()
+    for _path, data in _list_session_files(sessions_dir):
+        sid = (data.get("session_id") or "").strip()
+        if sid and sid[:8].lower().startswith(partial.lower()):
+            out.add(sid[:8])
+    return sorted(out)
+
+
+def _completion_candidates(
+    buffer: str,
+    tools_dir: str = None,
+    loaded_modules: list = None,
+    sessions_dir: str = None,
+    list_models: callable = None,
+    skills_dir: str = None,
+) -> list:
     """Compute Tab-completion candidates for a raw input line.
 
     Pure function (no readline dependency) so it can be unit-tested:
-    commands on the first word, subcommands on the first argument, and
-    file paths for commands that take a path argument.
+    commands on the first word, subcommands on the first argument, file
+    paths for path arguments, toolset names for the /tools subcommands
+    (scanned from the tools directory / the loaded-tool module names),
+    saved-session titles/ids for /resume, installed model names for
+    /model, skill names for /skill load, session selectors for /sessions
+    rm, session id prefixes for /rename, and on/off/undo values for
+    /context, /compact auto and /cut.
     """
     stripped = buffer.lstrip()
     if not stripped:
@@ -381,8 +623,8 @@ def _completion_candidates(buffer: str) -> list:
 
     arg_index = len(tokens) if trailing_space else len(tokens) - 1
 
-    if arg_index == 1 and head in _COMMAND_SUBCOMMANDS:
-        subs = [s for s in _COMMAND_SUBCOMMANDS[head] if s.startswith(partial)]
+    if arg_index == 1 and head in _SUBCOMMAND_HANDLERS:
+        subs = [s for s in _SUBCOMMAND_HANDLERS[head] if s.startswith(partial)]
         if head == "/systemprompt":
             for f in _complete_file_path(partial):
                 if f not in subs:
@@ -392,27 +634,151 @@ def _completion_candidates(buffer: str) -> list:
     if head in _PATH_COMMANDS and arg_index == 1:
         return _complete_file_path(partial)
 
-    if head == "/skill" and arg_index == 2 and tokens[1].lower() == "load":
-        return _complete_file_path(partial)
+    if head == "/tools" and arg_index >= 2:
+        sub = tokens[1].lower()
+        if sub in _TOOLS_SUBCOMMANDS:
+            kind = _TOOLS_SUBCOMMANDS[sub][1]
+            if kind == "toolset":
+                return _complete_toolset_module(partial, tools_dir)
+            if kind == "loaded_toolset":
+                names = []
+                for m in (loaded_modules or []):
+                    parts = m.split(".")
+                    names.append(parts[-1] if len(parts) == 2 else m)
+                out = []
+                for s in names:
+                    if s.startswith(partial) or s.rsplit(".", 1)[-1].startswith(partial):
+                        out.append(s)
+                return out
+
+    if head == "/skill" and arg_index == 2:
+        sub = tokens[1].lower()
+        if sub in _SKILL_SUBCOMMANDS and _SKILL_SUBCOMMANDS[sub][1] == "path":
+            return _skill_load_completion_candidates(skills_dir, partial)
 
     if head == "/systemprompt" and arg_index >= 2:
         return _complete_file_path(partial)
 
+    if head == "/resume" and arg_index >= 1:
+        return _session_completion_candidates(sessions_dir, partial)
+
+    if head == "/model" and arg_index == 1:
+        return _model_completion_candidates(list_models, partial)
+
+    if head == "/sessions" and arg_index >= 2 and tokens[1].lower() == "rm":
+        return _sessions_rm_completion_candidates(sessions_dir, partial)
+
+    if head == "/rename" and arg_index == 1:
+        return _session_id_prefix_completion_candidates(sessions_dir, partial)
+
+    if head == "/context" and arg_index == 1:
+        return [v for v in ("on", "off") if v.startswith(partial)]
+
+    if head == "/compact" and arg_index >= 2 and tokens[1].lower() == "auto":
+        return [v for v in ("on", "off") if v.startswith(partial)]
+
+    if head == "/cut" and arg_index == 1:
+        return [v for v in ("undo",) if v.startswith(partial)]
+
     return []
 
 
-def _complete(text: str, state: int):
-    """readline completer callback, driven by the current line buffer."""
-    if readline is None:
-        return None
-    matches = _completion_candidates(readline.get_line_buffer())
-    return matches[state] if state < len(matches) else None
+def _maybe_append_completion_space(buffer: str, matches: list) -> list:
+    """Append a trailing space to the sole completion of a command word,
+    subcommand word, or toolset-name argument so the next Tab reaches the
+    next completion level.
+
+    Pure and readline-free. Because space is a readline delimiter, GNU
+    readline never appends a trailing space itself, so a completed command
+    would otherwise stall on the same branch. Ambiguous matches (len != 1)
+    and file-path completions are returned unchanged: appending a space to
+    every match of a shared prefix would silently commit readline to the
+    common prefix (e.g. ``load`` for ``load``/``loaded``).
+    """
+    if len(matches) != 1:
+        return matches
+    stripped = buffer.lstrip()
+    if not stripped:
+        return matches
+    trailing_space = stripped[-1] in " \t"
+    tokens = stripped.split()
+    head = tokens[0].lower()
+    arg_index = len(tokens) if trailing_space else len(tokens) - 1
+    match = matches[0]
+
+    if len(tokens) == 1 and not trailing_space and head.startswith("/"):
+        return [match + " "]
+
+    if arg_index == 1 and head in _SUBCOMMAND_HANDLERS:
+        if head == "/systemprompt" and match not in _SUBCOMMAND_HANDLERS[head]:
+            return matches
+        return [match + " "]
+
+    if (
+        head == "/tools"
+        and arg_index >= 2
+        and tokens[1].lower() in _TOOLS_SUBCOMMANDS
+    ):
+        kind = _TOOLS_SUBCOMMANDS[tokens[1].lower()][1]
+        if kind in ("toolset", "loaded_toolset"):
+            if match.endswith("."):
+                return matches
+            return [match + " "]
+
+    if head == "/resume" and arg_index >= 1:
+        return [match + " "]
+
+    if head == "/model" and arg_index == 1:
+        return [match + " "]
+
+    if head == "/context" and arg_index == 1:
+        return [match + " "]
+
+    if head == "/cut" and arg_index == 1:
+        return [match + " "]
+
+    if head == "/rename" and arg_index == 1:
+        return [match + " "]
+
+    if head == "/compact" and arg_index >= 2 and tokens[1].lower() == "auto":
+        return [match + " "]
+
+    if head == "/sessions" and arg_index >= 2 and tokens[1].lower() == "rm":
+        return [match + " "]
+
+    if head == "/skill" and arg_index == 2 and tokens[1].lower() == "load":
+        if match.endswith("/"):
+            return matches
+        return [match + " "]
+
+    return matches
 
 
-def _install_readline_completion() -> None:
-    """Enable Tab completion for commands, subcommands and file paths."""
+def _install_readline_completion(state=None) -> None:
+    """Enable Tab completion for commands, subcommands, toolsets and file paths.
+
+    The completer is a closure over the live ChatState so ``/tools load``
+    completion sees newly created tool modules and newly loaded toolsets
+    without re-installing the binding.
+    """
     if readline is None:
         return
+
+    model_lister = _make_model_lister(state)
+
+    def _complete(text: str, index: int):
+        line = readline.get_line_buffer()
+        matches = _completion_candidates(
+            line,
+            getattr(state, "tools_dir", None),
+            getattr(state, "loaded_tool_modules", []),
+            getattr(state, "sessions_dir", None),
+            list_models=model_lister,
+            skills_dir=getattr(state, "skills_dir", None),
+        )
+        matches = _maybe_append_completion_space(line, matches)
+        return matches[index] if index < len(matches) else None
+
     readline.set_completer(_complete)
     readline.set_completer_delims(" \t\n")
     if "libedit" in (readline.__doc__ or ""):
@@ -489,16 +855,28 @@ def _ensure_ctx_max(state: ChatState) -> None:
     running model's allocated context (client.ps) -> the model's num_ctx
     parameter -> the model's declared capacity (client.show). Returns None
     when nothing is known, in which case the meter shows token counts without
-    a percentage.
+    a percentage. For llama.cpp models the server's window (allocated at
+    launch) is authoritative, so the --num_ctx shortcut is skipped; it is
+    only used as a fallback when the server reports no window.
     """
     if state.ctx_max is not None:
         return
     state.ctx_max = _resolve_ctx_max(state)
 
 
+def _is_llamacpp_model(model_id) -> bool:
+    """True when ``model_id`` belongs to the llama.cpp backend.
+
+    The llama.cpp server allocates its context at launch, so ``--num_ctx``
+    (honored there, not per request) must not skew the meter against the
+    server-reported window.
+    """
+    return isinstance(model_id, str) and model_id.startswith("llamacpp:")
+
+
 def _resolve_ctx_max(state: ChatState):
     num_ctx = (state.options or {}).get("num_ctx")
-    if num_ctx:
+    if num_ctx and not _is_llamacpp_model(state.model):
         return int(num_ctx)
 
     override = os.environ.get("LAMA_OLE_CTX_SIZE")
@@ -535,6 +913,11 @@ def _resolve_ctx_max(state: ChatState):
     except Exception:
         pass
 
+    # llama.cpp servers allocate the window at launch; when the server
+    # reports nothing usable, fall back to the requested --num_ctx as the
+    # best estimate so the meter keeps its bar/percentage.
+    if num_ctx:
+        return int(num_ctx)
     return None
 
 
@@ -1067,11 +1450,12 @@ def _rollback_interrupted_turn(state, e, user_msg, messages_before):
 
 def run_chat(state: ChatState):
     print("Chat mode. Type /help for commands.")
-    _install_readline_completion()
+    _install_readline_completion(state)
     _install_bracketed_paste()
     _bind_mode_toggle(state)
     _install_typeahead_replay(state)
     use_color = color_util.color_mode_enabled(state.color)
+    output_format = history_mod.parse_output_format()
     if state.ctx_meter:
         _ensure_ctx_max(state)
     base_prompt = color_util.colored(">>> ", color_util.C_PROMPT, use_color)
@@ -1147,9 +1531,11 @@ def run_chat(state: ChatState):
                     metrics=metrics,
                     mode_state=state,
                     show_diff=state.show_diff,
+                    output_format=output_format,
                 )
             finally:
                 state.stop_hotkey_listener()
+            stamp_turn_messages(state, messages_before)
             state.ctx_usage = metrics
             state.ctx_usage_model = state.model
             _accumulate_stats(state, metrics)
@@ -1184,95 +1570,55 @@ def _handle_command(line: str, state: ChatState) -> bool:
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
 
-    if cmd in ("/exit", "/quit"):
-        return True
-
-    elif cmd == "/help":
-        _show_help()
-
-    elif cmd == "/new":
-        if _has_conversation(state):
-            autosave_session(state)
-        state.messages.clear()
-        state.ctx_usage = None
-        state.session_id = new_session_id()
-        state.session_created_at = time.time()
-        state.stats_by_model.clear()
-        print("New session started. Previous session preserved; use /resume to restore it.")
-
-    elif cmd == "/compact":
-        sub = arg.strip().lower()
-        if not sub:
-            run_compaction(state, confirm=True)
-        elif sub == "auto" or sub.startswith("auto "):
-            _cmd_compact_auto(sub.split(maxsplit=1)[1] if sub != "auto" else "", state)
-        else:
-            print("Usage: /compact [auto on|off]")
-            print("  /compact          Compact the context now (ask for confirmation)")
-            print("  /compact auto     Show whether auto-compaction is enabled")
-            print("  /compact auto on  Enable auto-compaction on threshold crossing")
-            print("  /compact auto off Disable auto-compaction")
-
-    elif cmd == "/feed":
-        _cmd_feed(arg, state)
-
-    elif cmd == "/model":
-        if not arg:
-            print(f"Current model: {state.model}")
-        else:
-            state.model = arg
-            if state.ctx_usage and state.ctx_usage_model and state.ctx_usage_model != arg:
-                state.ctx_usage = dict(state.ctx_usage)
-                state.ctx_usage["_estimated"] = True
-                state.ctx_usage_model = arg
-            print(f"Switched to model: {arg}")
-
-    elif cmd == "/plan":
-        _set_mode(state, "plan")
-
-    elif cmd == "/build":
-        _set_mode(state, "build")
-
-    elif cmd == "/save":
-        _cmd_save(arg, state)
-
-    elif cmd == "/load":
-        _cmd_load(arg, state)
-
-    elif cmd == "/resume":
-        _cmd_resume(arg, state)
-
-    elif cmd == "/sessions":
-        _cmd_sessions(arg, state)
-
-    elif cmd == "/stats":
-        _cmd_stats(state)
-
-    elif cmd == "/rename":
-        _cmd_rename(arg, state)
-
-    elif cmd == "/tools":
-        _cmd_tools(arg, state)
-
-    elif cmd == "/skill":
-        _cmd_skill(arg, state)
-
-    elif cmd == "/systemprompt":
-        _cmd_systemprompt(arg, state)
-
-    elif cmd == "/context":
-        _cmd_context(arg, state)
-
-    elif cmd == "/history":
-        _cmd_history(arg, state)
-
-    elif cmd == "/cut":
-        _cmd_cut(arg, state)
-
-    else:
+    handler = _COMMAND_HANDLERS.get(cmd)
+    if handler is None:
         print(f"Unknown command: {cmd}. Type /help for available commands.")
+        return False
+    return bool(handler(arg, state))
 
-    return False
+
+def _cmd_new(arg: str, state: ChatState):
+    if _has_conversation(state):
+        autosave_session(state)
+    state.messages.clear()
+    state.ctx_usage = None
+    state.session_id = new_session_id()
+    state.session_created_at = time.time()
+    state.stats_by_model.clear()
+    print("New session started. Previous session preserved; use /resume to restore it.")
+
+
+def _cmd_model(arg: str, state: ChatState):
+    if not arg:
+        print(f"Current model: {state.model}")
+    else:
+        canonicalize = getattr(state.client, "canonicalize", None)
+        model = canonicalize(arg) if callable(canonicalize) else arg
+        state.model = model
+        state.loaded_model = model
+        ensure = getattr(state, "ensure_llamacpp", None)
+        if ensure is not None and _is_llamacpp_model(model):
+            ensure(model)
+        if state.ctx_usage and state.ctx_usage_model and state.ctx_usage_model != model:
+            state.ctx_usage = dict(state.ctx_usage)
+            state.ctx_usage["_estimated"] = True
+            state.ctx_usage_model = model
+        autosave_session(state)
+        print(f"Switched to model: {model}")
+
+
+def _cmd_compact(arg: str, state: ChatState):
+    sub = arg.strip().lower()
+    if not sub:
+        run_compaction(state, confirm=True)
+    elif sub == "auto" or sub.startswith("auto "):
+        _cmd_compact_auto(sub.split(maxsplit=1)[1] if sub != "auto" else "", state)
+    else:
+        print("Usage: /compact [auto on|off]")
+        print("  /compact          Compact the context now (ask for confirmation)")
+        print("  /compact auto     Show whether auto-compaction is enabled")
+        print("  /compact auto on  Enable auto-compaction on threshold crossing")
+        print("  /compact auto off Disable auto-compaction")
 
 
 def _show_help():
@@ -1287,7 +1633,8 @@ def _show_help():
     print("  /save <path>    Save the conversation to a JSON file")
     print("  /load <path>    Load a conversation from a JSON file")
     print("  /resume [id|title]  Resume a saved session (with no arg: picker; with a match: direct)")
-    print("  /sessions       List all saved sessions")
+    print("  /sessions [all]  List saved sessions in this directory (1 = oldest, newest shown first);")
+    print("                  'all' includes every project; /sessions rm deletes (N | -N | a..b | all)")
     print("  /stats          Show model, last turn's per-round breakdown, and session averages")
     print("  /rename <new title>  Rename the current session")
     print("  /rename <id-prefix> <new title>  Rename a stored session")
@@ -1305,8 +1652,8 @@ def _show_help():
     print("  /systemprompt <file>  Load a system prompt from a file")
     print("  /systemprompt unset   Unset the system prompt")
     print("  /context [on|off]  Show context usage stats, or toggle the context meter")
-    print("  /history [-t] [N] [-N] [a..b ...]   Show conversation history entries")
-    print("  /cut N | /cut a..b | /cut undo   Remove entries from the history")
+    print("  /history [-t] [N] [-N] [a..b ...]   Show history entries (1 = oldest, -N = last N)")
+    print("  /cut N | /cut -N | /cut a..b | /cut undo   Trim history to a selection (keeps what you name)")
     print("  /help           Show this help message")
     print("  /exit, /quit    Exit the chat")
     print()
@@ -1420,6 +1767,7 @@ def _cmd_feed(path: str, state: ChatState):
             state_manager=state.state_manager,
             metrics=metrics,
             show_diff=state.show_diff,
+            output_format=history_mod.parse_output_format(),
         )
         state.ctx_usage = metrics
         state.ctx_usage_model = state.model
@@ -1438,58 +1786,8 @@ def _cmd_feed(path: str, state: ChatState):
 
 
 def _toolcall_summary(msg):
-    """Human-readable summary of the tool calls in an assistant message.
-
-    Mirrors the ``[data from <name>: <args>]`` marker that tool results are
-    wrapped with, so the default /history shows which tool was invoked with
-    which arguments without dumping the full result data.
-    """
-    calls = msg.get("tool_calls") or []
-    parts = []
-    for tc in calls:
-        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-        name = fn.get("name", "?")
-        arguments = fn.get("arguments") or {}
-        if isinstance(arguments, dict):
-            args_str = ", ".join(f"{k}={v!r}" for k, v in arguments.items())
-        else:
-            args_str = str(arguments)
-        parts.append(f"[data from {name}: {args_str}]")
-    return ", ".join(parts)
-
-
-def _format_history_entry(entry):
-    import json
-    num = entry['num']
-    etype = entry['type'].upper()
-    msg = entry['msg']
-    role = msg.get('role')
-    content = msg.get('content', '')
-    ts = msg.get('timestamp')
-    prefix = f"[{num}] [{ts}] " if ts else f"[{num}] "
-
-    if role == 'user':
-        return f"{prefix}USER: {content}"
-    elif role == 'assistant':
-        if etype == 'THINKING':
-            if isinstance(content, dict) and 'thinking' in content:
-                thought = content['thinking']
-                return f"{prefix}ASSISTANT (THOUGHT): {thought}"
-            else:
-                return f"{prefix}ASSISTANT (THOUGHT): {content}"
-        elif etype == 'TOOLCALL':
-            summary = _toolcall_summary(msg)
-            if summary:
-                return f"{prefix}ASSISTANT (TOOLCALL) TOOL: {summary}"
-            return f"{prefix}ASSISTANT (TOOLCALL)"
-        else: # output
-            if isinstance(content, dict):
-                return f"{prefix}ASSISTANT: {json.dumps(content)}"
-            return f"{prefix}ASSISTANT: {content}"
-    elif role == 'tool':
-        return f"{prefix}TOOL: {content}"
-    else:
-        return f"{prefix}{etype}: {msg}"
+    """Human-readable summary of the tool calls in an assistant message."""
+    return history_mod.toolcall_summary(msg)
 
 
 def _cmd_history(arg: str, state: ChatState):
@@ -1498,138 +1796,113 @@ def _cmd_history(arg: str, state: ChatState):
         print("No history available.")
         return
 
-    M = len(state.messages)
-    # -t includes tool responses; otherwise tool results are hidden
-    # (only output, thinking, toolcalls and user messages are shown).
+    # -t forces tool results on even when the template hides them.
     include_tool_results = False
-    target_ranges = []  # List of (start_num, end_num) where numbers are 1..M
-
+    tokens = []
     for token in arg.split():
         if token == "-t":
             include_tool_results = True
-        elif ".." in token:
-            try:
-                a, b = map(int, token.split(".."))
-                target_ranges.append((min(a, b), max(a, b)))
-            except ValueError:
-                pass
         else:
-            try:
-                val = int(token)
-            except ValueError:
-                continue
-            if val < 0:
-                n = abs(val)
-                target_ranges.append((1, n))
-            else:
-                # "first N" means numbers M down to M-N+1
-                target_ranges.append(("first", val))
+            tokens.append(token)
 
+    selectors = history_mod.parse_selectors(" ".join(tokens))
+    formats = history_mod.parse_line_formats("history")
     if include_tool_results:
-        visible = entries
-    else:
-        visible = [e for e in entries if e["type"] != "tool_result"]
+        formats = history_mod.with_tool_results(formats)
+    use_color = color_util.color_mode_enabled(state.color)
 
-    if not target_ranges:
-        # /history -> show all (respecting the -t filter)
-        for e in visible:
-            print(_format_history_entry(e))
+    if not selectors:
+        # /history -> show all entries that have a template, oldest first.
+        for e in entries:
+            line = history_mod.format_list_entry(e, use_color, formats=formats)
+            if line:
+                print(line)
         return
 
-    # Collect all numbers to show
-    numbers_to_show = set()
-    for r in target_ranges:
-        if isinstance(r[0], int):
-            start, end = r
-            for n in range(start, end + 1):
-                numbers_to_show.add(n)
-        elif r[0] == "first":
-            n = r[1]
-            # First N entries are numbers M, M-1, ..., M-N+1
-            for j in range(M - n + 1, M + 1):
-                numbers_to_show.add(j)
-
-    if not numbers_to_show:
+    numbers = history_mod.select_entry_numbers(entries, selectors)
+    if not numbers:
         print("No history matches the criteria.")
         return
 
-    # Sort numbers descending (M down to 1)
-    sorted_nums = sorted(numbers_to_show, reverse=True)
-
     found_any = False
-    for n in sorted_nums:
-        entry = next((e for e in visible if e["num"] == n), None)
-        if entry:
-            print(_format_history_entry(entry))
-            found_any = True
-
+    for e in entries:
+        if e["num"] in numbers:
+            line = history_mod.format_list_entry(e, use_color, formats=formats)
+            if line:
+                print(line)
+                found_any = True
     if not found_any:
         print("No history matches the criteria.")
 
 
-def _cmd_cut(arg: str, state: ChatState):
-    """Remove entries from the conversation history (/cut N, /cut a..b, /cut undo).
+def stamp_turn_messages(state, start):
+    """Stamp every message a turn appended (assistant / tool / thinking).
 
-    History numbers count from M (oldest) down to 1 (newest), matching
-    /history. /cut N removes entries numbered 1..N; /cut a..b removes the
-    entries numbered a..b. System messages are never removed.
+    Only the user's message is stamped at input time (see :meth:`stamp_message`),
+    so /history would otherwise render ``{ts}`` for user entries alone. This
+    pass runs after the turn completes so all new entries carry a timestamp,
+    matching session replay where restored messages are stamped on load.
+    """
+    for m in state.messages[start:]:
+        state.stamp_message(m)
+
+
+def _cmd_cut(arg: str, state: ChatState):
+    """Trim the conversation history down to a selection (/cut N, /cut -N, /cut a..b, /cut undo).
+
+    ``/cut`` keeps exactly the entries it names and removes the rest: entries
+    are numbered 1 (oldest) .. V (newest), so ``/cut N`` keeps entries N..V
+    (dropping the older 1..N-1), ``/cut -N`` keeps the last N, and
+    ``/cut a..b`` keeps only that inclusive range (negative bounds count from
+    the end). ``/cut 1`` keeps everything and is a no-op. System messages are
+    never removed. The result is persisted immediately so the on-disk session
+    stays in sync with the live history.
     """
     arg = arg.strip()
     if not arg:
-        print("Usage: /cut N | /cut a..b | /cut undo")
+        print("Usage: /cut N | /cut -N | /cut a..b | /cut undo")
         return
 
     if arg == "undo":
         if state.undo_cut():
             print("Cut undone.")
+            autosave_session(state)
         else:
             print("Nothing to undo.")
         return
 
-    M = len(state.messages)
-    if M == 0:
+    entries = state.get_history_entries()
+    if not entries:
         print("No history to cut.")
         return
 
-    numbers = set()
-    for token in arg.split():
-        if ".." in token:
-            try:
-                a, b = map(int, token.split(".."))
-            except ValueError:
-                print(f"Invalid range: {token}")
-                return
-            lo, hi = min(a, b), max(a, b)
-            numbers.update(range(lo, hi + 1))
-        else:
-            try:
-                n = int(token)
-            except ValueError:
-                print(f"Invalid cut argument: {token}")
-                return
-            if n < 1:
-                print(f"Invalid cut argument: {token}")
-                return
-            # /cut N removes the last N entries (numbers 1..N).
-            numbers.update(range(1, n + 1))
+    selectors = history_mod.parse_cut_selectors(arg)
+    if not selectors:
+        print(f"Invalid cut argument: {arg}")
+        return
 
-    # Map history numbers (1..M) back to message indices (index = M - num).
-    indices = sorted({M - n for n in numbers if 1 <= n <= M}, reverse=True)
-    # Never remove system messages (keeps the conversation in a valid state).
-    indices = [i for i in indices if state.messages[i].get("role") != "system"]
-
-    if not indices:
+    # System messages are never removed (keeps the conversation valid).
+    kept = history_mod.select_message_indices(entries, selectors)
+    if not kept:
         print("Nothing to cut.")
         return
 
-    removed = [state.messages[i] for i in indices]
-    state._last_cut_messages = removed
-    state._last_cut_indices = indices
+    removed = [
+        i for i, msg in enumerate(state.messages)
+        if msg.get("role") != "system" and i not in set(kept)
+    ]
+    if not removed:
+        print("Nothing to cut.")
+        return
 
-    for i in indices:
+    state._last_cut_messages = [state.messages[i] for i in removed]
+    state._last_cut_indices = removed
+
+    for i in reversed(removed):
         del state.messages[i]
 
-    print(f"Cut {len(removed)} message(s).")
+    print(f"Cut {len(removed)} message(s), kept {len(kept)}.")
+    autosave_session(state)
 
 
 def serialize_session(
@@ -1696,8 +1969,14 @@ def apply_session(state: ChatState, data: dict, source: str = "session") -> None
 
     Shared by ``/load`` and session resume. Unknown or absent keys are
     ignored so old-format files and forward compatibility both work.
+
+    Restored messages that lack a timestamp are stamped so /history renders
+    uniformly after a load/resume (and the next autosave persists the stamps).
     """
     state.messages = data.get("messages", [])
+    for m in state.messages:
+        if isinstance(m, dict) and "timestamp" not in m:
+            m["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
     if data.get("session_id"):
         state.session_id = data["session_id"]
     if data.get("created_at"):
@@ -1706,6 +1985,10 @@ def apply_session(state: ChatState, data: dict, source: str = "session") -> None
         state.session_title = data["title"]
     if "model" in data:
         state.model = data["model"]
+        # Canonicalize to ensure prefix is present; this fixes old sessions with bare IDs
+        # and ensures autosave will save the prefixed version.
+        if hasattr(state.client, "canonicalize"):
+            state.model = state.client.canonicalize(state.model)
     stored_usage = data.get("ctx_usage")
     stored_usage_model = data.get("ctx_usage_model")
     if stored_usage and stored_usage.get("prompt_eval_count"):
@@ -1941,84 +2224,114 @@ def _list_session_files(sessions_dir: str) -> list:
     return results
 
 
-def _collect_sessions(state: ChatState):
-    """Return (current_dir_sessions, other_sessions), each recency-sorted.
+def _session_age(data: dict) -> float:
+    """Recency timestamp for a session dict (updated_at preferred)."""
+    return data.get("updated_at") or data.get("created_at") or 0
 
-    Sessions whose recorded cwd matches the current directory are "current";
-    everything else is listed separately so renamed/moved projects remain
-    recoverable via the /resume picker.
+
+def _collect_session_groups(state: ChatState, all_projects: bool = False) -> list:
+    """Return [(label, [(num, path, data), ...]), ...] for the sessions listing.
+
+    Sessions are numbered 1 (oldest) .. V (newest) within each group, mirroring
+    /history. The current-cwd group comes first so its numbers are identical in
+    the bare and the 'all' listing; other projects follow, grouped by their
+    recorded cwd. Callers display each group newest-first (numbers travel with
+    their entries).
     """
-    sessions = _list_session_files(state.sessions_dir)
     current = os.path.normpath(os.getcwd())
-    cur = [pd for pd in sessions if os.path.normpath(pd[1].get("cwd") or "") == current]
-    other = [pd for pd in sessions if os.path.normpath(pd[1].get("cwd") or "") != current]
-    key = lambda pd: pd[1].get("updated_at") or pd[1].get("created_at") or 0
-    cur.sort(key=key, reverse=True)
-    other.sort(key=key, reverse=True)
-    return cur, other
+    sessions = _list_session_files(state.sessions_dir)
+    cur = [
+        pd for pd in sessions
+        if os.path.normpath(pd[1].get("cwd") or "") == current
+    ]
+    groups = [("current", cur)]
+    if all_projects:
+        others = [
+            pd for pd in sessions
+            if os.path.normpath(pd[1].get("cwd") or "") != current
+        ]
+        by_cwd = {}
+        for pd in others:
+            key = os.path.normpath(pd[1].get("cwd") or "?")
+            by_cwd.setdefault(key, []).append(pd)
+        for cwd in sorted(by_cwd):
+            groups.append((cwd, by_cwd[cwd]))
+    num = 0
+    result = []
+    for label, items in groups:
+        numbered = []
+        for path, data in sorted(items, key=lambda pd: _session_age(pd[1])):
+            num += 1
+            numbered.append((num, path, data))
+        result.append((label, numbered))
+    return result
 
 
-def _print_session(index: int, data: dict, current: bool = True) -> None:
+def _print_session(num: int, data: dict, current_sid: str = None) -> None:
     sid = (data.get("session_id") or "?")[:8]
     title = data.get("title") or "(untitled)"
     model = data.get("model") or "?"
-    updated = data.get("updated_at") or data.get("created_at") or 0
+    updated = _session_age(data)
     ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(updated))
     n = sum(1 for m in data.get("messages", []) if m.get("role") != "system")
-    marker = "" if current else " [moved]"
-    print(f"  {index}. [{ts}] {title}  ({model}, {n} msgs, {sid}){marker}")
+    marker = "*" if current_sid and data.get("session_id") == current_sid else " "
+    print(f"{marker} {num}. [{ts}] {title}  ({model}, {n} msgs, {sid})")
+
+
+def _display_session_groups(groups: list, current_sid: str = None) -> None:
+    """Print session groups newest-first, with project headers."""
+    first_other = True
+    for label, items in groups:
+        if not items:
+            continue
+        if label == "current":
+            print(f"Sessions in {os.getcwd()} (newest first):")
+        else:
+            if first_other:
+                print()
+                print("Other projects:")
+                first_other = False
+            print(f"  {label}:")
+        for num, path, data in reversed(items):
+            _print_session(num, data, current_sid)
+
+
+def _print_sessions_footer(groups: list, state: ChatState) -> None:
+    """Print the count summary and the active session's file path."""
+    total = sum(len(items) for _label, items in groups)
+    if not total:
+        return
+    print()
+    print(f"{total} session(s) stored in {state.sessions_dir}")
+    if state.session_id:
+        for _label, items in groups:
+            for _num, path, data in items:
+                if data.get("session_id") == state.session_id:
+                    print("current session file: " + os.path.relpath(path, state.sessions_dir))
+                    return
 
 
 def _replay_history(state: ChatState, use_color: bool) -> None:
-    """Replay the conversation so a resumed session reads like the original.
+    """Replay a resumed session as a numbered listing, identical to /history.
 
-    System messages (safety prompt / skills) are skipped. Stored thinking is
-    replayed only when ``show_thinking`` is on (it is captured in the first
-    place only when ``-t`` was set during generation), mirroring live
-    visibility. Tool call/result markers are shown only when ``verbose >= 1``,
-    mirroring their live visibility in a normal run. Stored edit diffs are
-    replayed when ``show_diff`` is on, mirroring live edit display.
+    Rendering delegates to the shared history model (``format_list_entry``)
+    with the replay view's line templates (``LAMA_OLE_FORMAT_REPLAY``), so a
+    resumed session matches /history unless configured independently. Stored
+    edit diffs are printed after tool entries when ``show_diff`` is on,
+    mirroring live edit display.
     """
-    verbose = state.verbose or 0
-    for m in state.messages:
-        role = m.get("role")
-        content = m.get("content") or ""
-        if role == "system":
-            continue
-        if role == "user":
-            if m.get("compacted"):
-                label = color_util.colored("[compacted context] ", color_util.C_METER_MID, use_color)
-                print(label + color_util.colored(content, color_util.C_OUTPUT, use_color))
-            else:
-                print(
-                    color_util.colored(">>> ", color_util.C_PROMPT, use_color)
-                    + color_util.colored(content, color_util.C_INPUT, use_color)
-                )
-        elif role == "assistant":
-            if state.show_thinking and m.get("thinking"):
-                print(color_util.colored(m["thinking"], color_util.C_THINK, use_color))
-                print()
-            tool_calls = m.get("tool_calls") or []
-            if tool_calls:
-                if verbose >= 1:
-                    for tc in tool_calls:
-                        fn = tc.get("function", {})
-                        name = fn.get("name") or "?"
-                        arguments = fn.get("arguments") or {}
-                        if isinstance(arguments, dict):
-                            args_str = ", ".join(f"{k}={v!r}" for k, v in arguments.items())
-                        else:
-                            args_str = str(arguments)
-                        print(color_util.colored(f"[tool: {name}({args_str})]", color_util.C_OUTPUT, use_color))
-            elif content:
-                print(color_util.colored(content, color_util.C_OUTPUT, use_color))
-        elif role == "tool":
-            if verbose >= 1:
-                print(color_util.colored(f"[tool result: {m.get('tool_name') or '?'}]", color_util.C_OUTPUT, use_color))
-            if state.show_diff and m.get("diff"):
+    formats = history_mod.parse_line_formats("replay")
+    for entry in state.get_history_entries():
+        text = history_mod.format_list_entry(entry, use_color, formats=formats)
+        if text:
+            print(text)
+            # Stored edit diffs belong to the tool entry; keep them hidden
+            # when the entry itself is hidden by a template.
+            msg = entry["msg"]
+            if msg.get("role") == "tool" and state.show_diff and msg.get("diff"):
                 _print_diff_block(
-                    m.get("file") or m.get("tool_name") or "?",
-                    m.get("diff") or "",
+                    msg.get("file") or msg.get("tool_name") or "?",
+                    msg.get("diff") or "",
                     use_color,
                 )
 
@@ -2056,6 +2369,8 @@ def _cmd_resume(arg: str, state: ChatState):
 
     if arg:
         needle = arg.strip().lower()
+        if _RESUME_ANNOTATION_MARKER in needle:
+            needle = needle.split(_RESUME_ANNOTATION_MARKER)[0].strip()
         sessions = _list_session_files(state.sessions_dir)
         cands = [
             pd for pd in sessions
@@ -2069,19 +2384,15 @@ def _cmd_resume(arg: str, state: ChatState):
         _resume_into_state(state, cands[0][0], cands[0][1])
         return
 
-    cur, other = _collect_sessions(state)
-    all_items = cur + other
-    if not all_items:
+    groups = _collect_session_groups(state, all_projects=True)
+    ordered = []
+    for _label, items in groups:
+        ordered.extend(items)
+    if not ordered:
         print("No saved sessions to resume.")
         return
-    index = 0
-    for path, data in cur:
-        index += 1
-        _print_session(index, data, current=True)
-    for path, data in other:
-        index += 1
-        _print_session(index, data, current=False)
-    choice = input(f"Select session (1-{index}) or Enter to cancel: ").strip()
+    _display_session_groups(groups, current_sid=state.session_id)
+    choice = input(f"Select session (1-{len(ordered)}) or Enter to cancel: ").strip()
     if not choice:
         print("Cancelled.")
         return
@@ -2089,28 +2400,144 @@ def _cmd_resume(arg: str, state: ChatState):
         print("Invalid selection.")
         return
     n = int(choice)
-    if not (1 <= n <= index):
+    if not (1 <= n <= len(ordered)):
         print("Invalid selection.")
         return
-    _resume_into_state(state, all_items[n - 1][0], all_items[n - 1][1])
+    _resume_into_state(state, ordered[n - 1][1], ordered[n - 1][2])
 
 
 def _cmd_sessions(arg: str, state: ChatState):
     if not state.sessions_dir:
         print("Sessions directory is not configured.")
         return
-    cur, other = _collect_sessions(state)
-    if not cur and not other:
-        print("No saved sessions.")
+    arg = arg.strip().lower()
+    if arg == "rm" or arg.startswith("rm "):
+        _cmd_sessions_rm(arg[2:].strip(), state)
         return
-    index = 0
-    for path, data in cur:
-        index += 1
-        _print_session(index, data, current=True)
-    for path, data in other:
-        index += 1
-        _print_session(index, data, current=False)
-    print(f"\n{index} session(s) stored in {state.sessions_dir}")
+    if arg and arg not in ("all", "-a", "--all"):
+        print("Usage: /sessions [all]  |  /sessions rm <N | -N | a..b | all>")
+        return
+    groups = _collect_session_groups(state, all_projects=bool(arg))
+    if not any(items for _label, items in groups):
+        if arg:
+            print(f"No saved sessions in {state.sessions_dir}.")
+            return
+        total = len(_list_session_files(state.sessions_dir))
+        if total == 0:
+            print(f"No saved sessions in {state.sessions_dir}.")
+        else:
+            print(
+                f"No sessions saved in {os.getcwd()}. "
+                f"{total} session(s) found in other projects - "
+                "use /sessions all to list them."
+            )
+        return
+    _display_session_groups(groups, current_sid=state.session_id)
+    _print_sessions_footer(groups, state)
+
+
+def _parse_rm_selectors(arg: str) -> list:
+    """Parse /sessions rm selectors into (start, end) inclusive spans.
+
+    Mirrors the /cut grammar: ``N`` (exactly session N), ``-N`` (the N most
+    recent sessions), ``a..b`` (inclusive range; negative bounds count from the
+    newest), any space-separated combination. Invalid tokens are skipped.
+    """
+    ranges = []
+    for token in arg.split():
+        if ".." in token:
+            parts = token.split("..")
+            if len(parts) != 2:
+                continue
+            try:
+                a, b = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            if a == 0 or b == 0:
+                continue
+            ranges.append((a, b))
+        else:
+            try:
+                val = int(token)
+            except ValueError:
+                continue
+            if val == 0:
+                continue
+            if val < 0:
+                ranges.append((-abs(val), -1))
+            else:
+                ranges.append((val, val))
+    return ranges
+
+
+def _resolve_rm_selectors(selectors: list, count: int) -> list:
+    """Resolve rm selector spans against the session count (1 = oldest).
+
+    Negative bounds count from the newest session (-1 = newest). Returns the
+    sorted, de-duplicated, in-range session numbers to delete.
+    """
+    chosen = set()
+    for a, b in selectors:
+        if a < 0:
+            a = count + a + 1
+        if b < 0:
+            b = count + b + 1
+        lo, hi = sorted((a, b))
+        for n in range(lo, hi + 1):
+            if 1 <= n <= count:
+                chosen.add(n)
+    return sorted(chosen)
+
+
+def _cmd_sessions_rm(arg: str, state: ChatState):
+    if not state.sessions_dir:
+        print("Sessions directory is not configured.")
+        return
+    groups = _collect_session_groups(state, all_projects=True)
+    ordered = []
+    for _label, items in groups:
+        ordered.extend(items)
+    if not ordered:
+        print(f"No saved sessions in {state.sessions_dir}.")
+        return
+    if not arg:
+        _display_session_groups(groups, current_sid=state.session_id)
+        print()
+        choice = input(
+            "Delete which session(s)? (e.g. 2, 4..6, all, or Enter to cancel): "
+        ).strip()
+        if not choice:
+            print("Cancelled.")
+            return
+        arg = choice
+    if arg.strip().lower() == "all":
+        chosen = list(range(1, len(ordered) + 1))
+    else:
+        selectors = _parse_rm_selectors(arg)
+        if not selectors:
+            print("Usage: /sessions rm <N | -N | a..b | all>  (space-separated selectors allowed)")
+            return
+        chosen = _resolve_rm_selectors(selectors, len(ordered))
+    if not chosen:
+        print("No sessions match that selection.")
+        return
+    targets = [(num, path, data) for num, path, data in ordered if num in chosen]
+    print("Delete these session file(s)?")
+    for num, path, _data in targets:
+        print(f"  {num}. {os.path.relpath(path, state.sessions_dir)}")
+    confirm = input("Type 'y' to delete, anything else to cancel: ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+    removed = 0
+    for _num, path, _data in targets:
+        try:
+            os.remove(path)
+            print(f"removed {os.path.relpath(path, state.sessions_dir)}")
+            removed += 1
+        except OSError as e:
+            print(f"Error removing {path}: {e}", file=sys.stderr)
+    print(f"Deleted {removed} session(s).")
 
 
 def _cmd_rename(arg: str, state: ChatState):
@@ -2186,17 +2613,25 @@ def _list_skill_files(state: ChatState) -> list:
 def _resolve_skill_path(name: str, state: ChatState) -> str:
     """Resolve a skill name to a file path.
 
-    Absolute/relative paths that exist are used as-is; otherwise the name is
-    looked up in the skills directory (trying <name>.md, <name>.txt, <name>).
+    Names are resolved inside the skills directory only. Bare names and
+    relative path-style names (e.g. ``subdir/web``) are looked up inside the
+    skills directory, trying ``<name>``, ``<name>.md`` and ``<name>.txt``.
+    Absolute paths are accepted only when they resolve inside the skills tree.
     """
-    if os.path.exists(name):
-        return name
     skills_dir = _default_skills_dir(state)
-    for candidate in (f"{name}.md", f"{name}.txt", name):
-        path = os.path.join(skills_dir, candidate)
-        if os.path.exists(path):
-            return path
-    return name
+    if not skills_dir:
+        return name
+    if os.path.isabs(name):
+        bases = [name]
+    else:
+        bases = [os.path.join(skills_dir, name)]
+    for base in bases:
+        for candidate in (base, f"{base}.md", f"{base}.txt"):
+            if os.path.exists(candidate) and _path_is_within_directory(
+                candidate, skills_dir
+            ):
+                return candidate
+    return None
 
 
 def _read_text_file(path: str, label: str = "file") -> str:
@@ -2242,6 +2677,9 @@ def _load_skill_texts(names: list, state: ChatState):
     parts = []
     for name in names:
         path = _resolve_skill_path(name, state)
+        if path is None:
+            print(f"Error: skill not found: {name}")
+            return None
         text = _read_skill_text(path)
         if text is None:
             return None
@@ -2249,57 +2687,70 @@ def _load_skill_texts(names: list, state: ChatState):
     return parts
 
 
+def _cmd_skill_list(state: ChatState):
+    files = _list_skill_files(state)
+    if not files:
+        print(f"No skills found in {_default_skills_dir(state)}")
+        return
+    print("Available skills:")
+    for f in files:
+        print(f"  {f}")
+
+
+def _cmd_skill_load(sub_arg: str, state: ChatState):
+    if not sub_arg:
+        print("Usage: /skill load <name-or-path> [<name-or-path> ...]")
+        return
+    names = sub_arg.strip().split()
+    texts = _load_skill_texts(names, state)
+    if texts is None:
+        return
+    combined = "\n\n".join(texts)
+    state.skill = " ".join(names)
+    state.skill_text = combined
+    state.apply_skill()
+    autosave_session(state)
+    print(f"Skill loaded: {' '.join(names)} ({len(combined)} characters)")
+
+
+def _cmd_skill_unload(state: ChatState):
+    if not state.skill_text:
+        print("No skill loaded.")
+        return
+    state.skill = None
+    state.skill_text = None
+    state.apply_skill()
+    autosave_session(state)
+    print("Skill unloaded.")
+
+
+def _cmd_skill_show(state: ChatState):
+    if not state.skill_text:
+        print("No skill loaded.")
+        return
+    print(f"Active skill: {state.skill or '(loaded via --skill)'}")
+    print("---")
+    print(state.skill_text)
+
+
+def _show_skill_usage():
+    print("Skill commands:")
+    print("  /skill list                              List available skills")
+    print("  /skill load <name-or-path> [<name-or-path> ...]  Load skill(s) into the system role")
+    print("  /skill unload                            Unload the active skill")
+    print("  /skill show                              Show the active skill")
+
+
 def _cmd_skill(arg: str, state: ChatState):
     parts = arg.strip().split(maxsplit=1)
     sub = parts[0].lower() if parts else ""
     sub_arg = parts[1] if len(parts) > 1 else ""
 
-    if sub == "list":
-        files = _list_skill_files(state)
-        if not files:
-            print(f"No skills found in {_default_skills_dir(state)}")
-            return
-        print("Available skills:")
-        for f in files:
-            print(f"  {f}")
-
-    elif sub == "load":
-        if not sub_arg:
-            print("Usage: /skill load <name-or-path> [<name-or-path> ...]")
-            return
-        names = sub_arg.strip().split()
-        texts = _load_skill_texts(names, state)
-        if texts is None:
-            return
-        combined = "\n\n".join(texts)
-        state.skill = " ".join(names)
-        state.skill_text = combined
-        state.apply_skill()
-        print(f"Skill loaded: {' '.join(names)} ({len(combined)} characters)")
-
-    elif sub == "unload":
-        if not state.skill_text:
-            print("No skill loaded.")
-            return
-        state.skill = None
-        state.skill_text = None
-        state.apply_skill()
-        print("Skill unloaded.")
-
-    elif sub == "show":
-        if not state.skill_text:
-            print("No skill loaded.")
-            return
-        print(f"Active skill: {state.skill or '(loaded via --skill)'}")
-        print("---")
-        print(state.skill_text)
-
-    else:
-        print("Skill commands:")
-        print("  /skill list                              List available skills")
-        print("  /skill load <name-or-path> [<name-or-path> ...]  Load skill(s) into the system role")
-        print("  /skill unload                            Unload the active skill")
-        print("  /skill show                              Show the active skill")
+    entry = _SKILL_SUBCOMMANDS.get(sub)
+    if entry is None:
+        _show_skill_usage()
+        return
+    entry[0](sub_arg, state)
 
 
 def _cmd_systemprompt(arg: str, state: ChatState):
@@ -2311,6 +2762,7 @@ def _cmd_systemprompt(arg: str, state: ChatState):
             return
         state.system_prompt = None
         state.apply_skill()
+        autosave_session(state)
         print("System prompt unset.")
         return
 
@@ -2326,6 +2778,7 @@ def _cmd_systemprompt(arg: str, state: ChatState):
         return
     state.system_prompt = text
     state.apply_skill()
+    autosave_session(state)
     print(f"System prompt loaded ({len(text)} characters)")
 
 
@@ -2339,23 +2792,35 @@ def _show_tools_usage():
     print("  /tools unload <toolset> [<toolset> ...] Unload one or more toolsets")
 
 
-def _resolve_toolset_module(name: str) -> str:
+def _resolve_toolset_module(name: str, tools_dir: str = None) -> str:
     """Map a user-supplied toolset name to an importable module name.
 
-    Bare names (e.g. ``dev_tools``) resolve to the tools package first
-    (``tools.dev_tools``), falling back to a top-level module. Dotted names are
-    used as-is.
+    Bare names (e.g. ``dev_tools``) resolve inside the tools package first
+    (``tools.dev_tools``). Dotted names resolve inside the tools package
+    hierarchy (``tools.<name>``, so subpackages of ``tools/`` work). Only leaf
+    module files inside the tools tree that export ``@tool`` functions are
+    accepted.
     """
-    if "." in name:
-        return name
-    candidates = [f"tools.{name}", name]
-    for c in candidates:
-        try:
-            if importlib.util.find_spec(c) is not None:
-                return c
-        except (ImportError, ModuleNotFoundError, AttributeError):
-            continue
-    return candidates[0]
+    if tools_dir is None:
+        from tool_base.registry import _TOOLS_PACKAGE_DIR
+        tools_dir = _TOOLS_PACKAGE_DIR
+    candidate = name if name.startswith("tools.") else f"tools.{name}"
+    try:
+        spec = importlib.util.find_spec(candidate)
+    except (ImportError, ModuleNotFoundError, AttributeError, ValueError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    origin = spec.origin
+    if origin in ("built-in", "frozen") or os.path.basename(origin) == "__init__.py":
+        return None
+    if not origin.endswith(".py"):
+        return None
+    if not _path_is_within_directory(origin, tools_dir):
+        return None
+    if not module_file_has_tools(origin):
+        return None
+    return candidate
 
 
 def _print_tool(t: Tool) -> None:
@@ -2407,7 +2872,7 @@ def _list_available_toolsets(state: ChatState):
     loaded = set(state.loaded_tool_modules)
     print("Available toolsets:")
     for n in names:
-        fq = _resolve_toolset_module(n)
+        fq = _resolve_toolset_module(n, state.tools_dir)
         marker = "  (loaded)" if fq in loaded else ""
         print(f"  {n}{marker}")
 
@@ -2416,7 +2881,10 @@ def _show_toolset(name: str, state: ChatState):
     if not name:
         print("Usage: /tools show <toolsetname>")
         return
-    module_name = _resolve_toolset_module(name)
+    module_name = _resolve_toolset_module(name, state.tools_dir)
+    if module_name is None:
+        print(f"Error: unknown toolset '{name}'.")
+        return
     short = module_name.rsplit(".", 1)[-1]
     tools = _resolve_toolset_tools(state, module_name)
     if tools is None:
@@ -2436,7 +2904,9 @@ def _list_all_tools(state: ChatState):
         return
     loaded = set(state.loaded_tool_modules)
     for n in names:
-        module_name = _resolve_toolset_module(n)
+        module_name = _resolve_toolset_module(n, state.tools_dir)
+        if module_name is None:
+            continue
         tools = _resolve_toolset_tools(state, module_name)
         if tools is None:
             tools = []
@@ -2458,12 +2928,16 @@ def _tools_load(names: str, state: ChatState):
     to_load = []
     ok = True
     for name in names:
-        module_name = _resolve_toolset_module(name)
+        module_name = _resolve_toolset_module(name, state.tools_dir)
+        if module_name is None:
+            print(f"Error: unknown toolset '{name}'.")
+            ok = False
+            continue
         short = module_name.rsplit(".", 1)[-1]
         if module_name in already:
             print(f"Toolset '{short}' is already loaded.")
             ok = False
-        elif short not in available:
+        elif "." not in name and short not in available:
             print(f"Error: unknown toolset '{name}'.")
             ok = False
         else:
@@ -2487,6 +2961,7 @@ def _tools_load(names: str, state: ChatState):
             return
     state.refresh_ollama_tools()
     short_names = " ".join(m.rsplit(".", 1)[-1] for m in loaded_any)
+    autosave_session(state)
     print(f"Loaded toolset(s): {short_names}")
 
 
@@ -2499,7 +2974,11 @@ def _tools_unload(names: str, state: ChatState):
     to_remove = []
     ok = True
     for name in names:
-        module_name = _resolve_toolset_module(name)
+        module_name = _resolve_toolset_module(name, state.tools_dir)
+        if module_name is None:
+            print(f"Error: toolset '{name}' is not loaded.")
+            ok = False
+            continue
         if module_name not in loaded:
             print(f"Error: toolset '{name}' is not loaded.")
             ok = False
@@ -2507,15 +2986,14 @@ def _tools_unload(names: str, state: ChatState):
             to_remove.append(module_name)
     if not ok:
         return
-    remove_tools = []
-    for module_name in to_remove:
-        remove_tools.extend(get_tools_of_module(module_name))
-    state.loaded_tool_modules = [
-        m for m in state.loaded_tool_modules if m not in set(to_remove)
-    ]
-    state.loaded_tools = [t for t in state.loaded_tools if t not in remove_tools]
+    remaining = [m for m in state.loaded_tool_modules if m not in set(to_remove)]
+    state.loaded_tool_modules = remaining
+    state.loaded_tools = []
+    for module_name in remaining:
+        state.loaded_tools.extend(get_tools_of_module(module_name))
     state.refresh_ollama_tools()
     short_names = " ".join(m.rsplit(".", 1)[-1] for m in to_remove)
+    autosave_session(state)
     print(f"Unloaded toolset(s): {short_names}")
 
 
@@ -2524,20 +3002,92 @@ def _cmd_tools(arg: str, state: ChatState):
     sub = parts[0].lower() if parts else ""
     sub_arg = parts[1] if len(parts) > 1 else ""
 
-    if sub == "":
+    if not sub:
         _show_tools_usage()
-    elif sub == "loaded":
-        _list_loaded_tools(state)
-    elif sub == "available":
-        _list_available_toolsets(state)
-    elif sub == "show":
-        _show_toolset(sub_arg, state)
-    elif sub == "all":
-        _list_all_tools(state)
-    elif sub == "load":
-        _tools_load(sub_arg, state)
-    elif sub == "unload":
-        _tools_unload(sub_arg, state)
-    else:
+        return
+    entry = _TOOLS_SUBCOMMANDS.get(sub)
+    if entry is None:
         print(f"Unknown /tools subcommand: {sub}")
         _show_tools_usage()
+        return
+    entry[0](sub_arg, state)
+
+
+# ---------------------------------------------------------------------------
+# Data-driven dispatch + completion registry
+#
+# _handle_command, _cmd_tools and _cmd_skill dispatch through the tables below,
+# and Tab completion (/_completion_candidates, /_maybe_append_completion_space)
+# reads the SAME tables — a command or subcommand is registered exactly once.
+# Keep insertion order: _COMMANDS order == the completion order.
+# ---------------------------------------------------------------------------
+
+
+_COMMAND_HANDLERS = {
+    "/feed": _cmd_feed,
+    "/new": _cmd_new,
+    "/compact": _cmd_compact,
+    "/model": _cmd_model,
+    "/plan": lambda _a, s: _set_mode(s, "plan"),
+    "/build": lambda _a, s: _set_mode(s, "build"),
+    "/save": _cmd_save,
+    "/load": _cmd_load,
+    "/resume": _cmd_resume,
+    "/sessions": _cmd_sessions,
+    "/stats": lambda _a, s: _cmd_stats(s),
+    "/rename": _cmd_rename,
+    "/tools": _cmd_tools,
+    "/skill": _cmd_skill,
+    "/systemprompt": _cmd_systemprompt,
+    "/context": _cmd_context,
+    "/history": _cmd_history,
+    "/cut": _cmd_cut,
+    "/help": lambda _a, _s: _show_help(),
+    "/exit": lambda _a, _s: True,
+    "/quit": lambda _a, _s: True,
+}
+
+_COMMANDS = list(_COMMAND_HANDLERS)
+
+
+_TOOLS_SUBCOMMANDS = {
+    "loaded":    (lambda _a, s: _list_loaded_tools(s), None),
+    "available": (lambda _a, s: _list_available_toolsets(s), None),
+    "show":      (_show_toolset, "toolset"),
+    "all":       (lambda _a, s: _list_all_tools(s), None),
+    "load":      (_tools_load, "toolset"),
+    "unload":    (_tools_unload, "loaded_toolset"),
+}
+
+_SKILL_SUBCOMMANDS = {
+    "list":   (lambda _a, s: _cmd_skill_list(s), None),
+    "load":   (_cmd_skill_load, "path"),
+    "unload": (lambda _a, s: _cmd_skill_unload(s), None),
+    "show":   (lambda _a, s: _cmd_skill_show(s), None),
+}
+
+# /compact, /systemprompt and /sessions keep bespoke dispatch (bare /compact
+# runs a compaction, /systemprompt <file> loads a prompt file, /sessions
+# handles rm/all/-a/--all itself) — the tables below are completion metadata
+# only, documented exceptions to the table-driven rule.
+_COMPACT_SUBCOMMANDS = {
+    "auto": (_cmd_compact_auto, None),
+}
+_SYSTEMPROMPT_SUBCOMMANDS = {
+    "show":  (lambda _a, s: _cmd_systemprompt("show", s), None),
+    "unset": (lambda _a, s: _cmd_systemprompt("unset", s), None),
+}
+_SESSIONS_SUBCOMMANDS = {
+    "all": (lambda _a, s: _cmd_sessions("all", s), None),
+    "rm":  (_cmd_sessions_rm, None),
+}
+
+_SUBCOMMAND_HANDLERS = {
+    "/compact": _COMPACT_SUBCOMMANDS,
+    "/tools": _TOOLS_SUBCOMMANDS,
+    "/skill": _SKILL_SUBCOMMANDS,
+    "/systemprompt": _SYSTEMPROMPT_SUBCOMMANDS,
+    "/sessions": _SESSIONS_SUBCOMMANDS,
+}
+
+_COMMAND_SUBCOMMANDS = {head: list(t) for head, t in _SUBCOMMAND_HANDLERS.items()}

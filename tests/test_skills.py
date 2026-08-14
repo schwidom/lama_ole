@@ -249,7 +249,7 @@ class TestCmdSkill:
 
     def test_load_by_path(self, tmp_path, capsys):
         state, _ = _make_chat_state(tmp_path)
-        skill_file = tmp_path / "custom.md"
+        skill_file = tmp_path / "skills" / "custom.md"
         _write_text(str(skill_file), "Custom skill text.")
         state.messages = [{"role": "user", "content": "hi"}]
 
@@ -272,7 +272,8 @@ class TestCmdSkill:
     def test_load_mixed_paths_and_names(self, tmp_path, capsys):
         state, skills_dir = _make_chat_state(tmp_path)
         _write_text(str(skills_dir / "named.md"), "Named skill")
-        other = tmp_path / "other.md"
+        other = skills_dir / "subdir" / "other.md"
+        other.parent.mkdir()
         _write_text(str(other), "Other skill")
         state.messages = [{"role": "user", "content": "hi"}]
 
@@ -348,6 +349,54 @@ class TestCmdSkill:
         assert state.skill == "s"
 
 
+class TestResolveSkillPath:
+    def test_bare_name_resolves_in_skills_dir(self, tmp_path, monkeypatch):
+        state, skills_dir = _make_chat_state(tmp_path)
+        _write_text(str(skills_dir / "code-reviewer.md"), "Review code carefully.")
+        monkeypatch.chdir(tmp_path)
+        assert (
+            chat._resolve_skill_path("code-reviewer", state)
+            == str(skills_dir / "code-reviewer.md")
+        )
+
+    def test_md_preferred_over_txt(self, tmp_path, monkeypatch):
+        state, skills_dir = _make_chat_state(tmp_path)
+        _write_text(str(skills_dir / "s.md"), "md")
+        _write_text(str(skills_dir / "s.txt"), "txt")
+        monkeypatch.chdir(tmp_path)
+        assert chat._resolve_skill_path("s", state) == str(skills_dir / "s.md")
+
+    def test_path_style_prefers_skills_dir_over_cwd_file(self, tmp_path, monkeypatch):
+        state, skills_dir = _make_chat_state(tmp_path)
+        sub = tmp_path / "subdir"
+        sub.mkdir()
+        _write_text(str(sub / "web"), "cwd skill")
+        (skills_dir / "subdir").mkdir()
+        _write_text(str(skills_dir / "subdir" / "web.md"), "skills-dir skill")
+        monkeypatch.chdir(tmp_path)
+        assert (
+            chat._resolve_skill_path("subdir/web", state)
+            == str(skills_dir / "subdir" / "web.md")
+        )
+
+    def test_path_style_resolves_inside_skills_dir(self, tmp_path, monkeypatch):
+        state, skills_dir = _make_chat_state(tmp_path)
+        (skills_dir / "subdir").mkdir()
+        _write_text(str(skills_dir / "subdir" / "web.md"), "skills-dir skill")
+        monkeypatch.chdir(tmp_path)
+        assert (
+            chat._resolve_skill_path("subdir/web", state)
+            == str(skills_dir / "subdir" / "web.md")
+        )
+
+    def test_path_style_rejects_out_of_tree_path(self, tmp_path, monkeypatch):
+        state, skills_dir = _make_chat_state(tmp_path)
+        outside = tmp_path / "outside.md"
+        _write_text(str(outside), "outside skill")
+        monkeypatch.chdir(tmp_path)
+        assert chat._resolve_skill_path(str(outside), state) is None
+
+
 class TestSkillPersistence:
     def test_save_load_persists_skill(self, tmp_path, capsys):
         state, _ = _make_chat_state(tmp_path)
@@ -360,4 +409,3 @@ class TestSkillPersistence:
         chat._cmd_load(path, state2)
         assert state2.skill == "code-reviewer"
         assert state2.skill_text == "Review code."
-
