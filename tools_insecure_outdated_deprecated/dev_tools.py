@@ -42,10 +42,53 @@ def _validate_path(path: str) -> Optional[str]:
     return None
 
 
+def _read_file_entropy_checked(path: str) -> Optional[bytes]:
+    """Read a file as bytes, or None if it fails the entropy check.
+
+    Binary / random content is rejected so that garbage bytes never reach
+    the LLM context via grep-style tools.
+    """
+    from security.entropychecker import EntropyChecker
+
+    with open(path, "rb") as f:
+        raw_content = f.read()
+
+    if EntropyChecker().feed(raw_content).is_suspicious:
+        return None
+    return raw_content
+
+
+def _append_skipped_files(result: str, skipped_files: list) -> str:
+    """Append a summary of entropy-skipped files to a grep result string."""
+    if not skipped_files:
+        return result
+    warning = (
+        f"\n[Skipped {len(skipped_files)} file(s) due to entropy check]:\n"
+        + "\n".join(f"  - {sf}" for sf in skipped_files)
+    )
+    return result + warning
+
+
 @tool(description="Read the contents of a file")
 def read_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+    with open(path, "rb") as f:
+        raw_content = f.read()
+
+    # Entropy check: reject binary / random content before it reaches the LLM
+    from security.entropychecker import EntropyChecker
+
+    checker = EntropyChecker()
+    result = checker.feed(raw_content)
+    if result.is_suspicious:
+        return {
+            "status": "error",
+            "message": [f"File rejected by entropy check: {result.reason}"],
+        }
+
+    return {
+        "status": "success",
+        "data": raw_content.decode("utf-8", errors="replace"),
+    }
 
 
 @tool(description="Write content to a file (creates or overwrites)")
@@ -99,15 +142,24 @@ def grep(pattern: str, path: str = ".", include: str = "*") -> str:
     else:
         return "(no matches or path not found)"
 
+    skipped_files = []
+
     for fpath in files_to_search:
         try:
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                for i, line in enumerate(f, 1):
-                    if re.search(pattern, line):
-                        matches.append(f"{fpath}:{i}: {line.rstrip()}")
+            raw_content = _read_file_entropy_checked(fpath)
+            if raw_content is None:
+                skipped_files.append(fpath)
+                continue
+
+            content = raw_content.decode("utf-8", errors="replace")
+            for i, line in enumerate(content.splitlines(), 1):
+                if re.search(pattern, line):
+                    matches.append(f"{fpath}:{i}: {line.rstrip()}")
         except Exception:
             pass
-    return "\n".join(matches) if matches else "(no matches)"
+
+    result = "\n".join(matches) if matches else "(no matches)"
+    return _append_skipped_files(result, skipped_files)
 
 @tool(description="Search for a fixed string pattern in files under a path")
 def grepF(pattern: str, path: str = ".", include: str = "*") -> str:
@@ -123,15 +175,24 @@ def grepF(pattern: str, path: str = ".", include: str = "*") -> str:
     else:
         return "(no matches or path not found)"
 
+    skipped_files = []
+
     for fpath in files_to_search:
         try:
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                for i, line in enumerate(f, 1):
-                    if re.search(re.escape(pattern), line):
-                        matches.append(f"{fpath}:{i}: {line.rstrip()}")
+            raw_content = _read_file_entropy_checked(fpath)
+            if raw_content is None:
+                skipped_files.append(fpath)
+                continue
+
+            content = raw_content.decode("utf-8", errors="replace")
+            for i, line in enumerate(content.splitlines(), 1):
+                if re.search(re.escape(pattern), line):
+                    matches.append(f"{fpath}:{i}: {line.rstrip()}")
         except Exception:
             pass
-    return "\n".join(matches) if matches else "(no matches)"
+
+    result = "\n".join(matches) if matches else "(no matches)"
+    return _append_skipped_files(result, skipped_files)
 
 
 @tool(description="Find files matching a glob pattern")
@@ -154,6 +215,35 @@ def file_info(path: str) -> str:
         f"Permissions: {oct(stat.st_mode & 0o777)}",
     ]
     return "\n".join(lines)
+
+
+@tool(description="Execute a shell command and return its output")
+def run_command(command: str, timeout: int = 30) -> str:
+    error = _validate_command(command)
+    if error:
+        return error
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        output = ""
+        if result.stdout:
+            output += result.stdout
+        if result.stderr:
+            if output:
+                output += "\n--- stderr ---\n"
+            output += result.stderr
+        if result.returncode != 0:
+            output += f"\n(exit code: {result.returncode})"
+        return output if output else "(no output)"
+    except subprocess.TimeoutExpired:
+        return f"Error: command timed out after {timeout}s"
+    except Exception as e:
+        return f"Error: {e}"
 
 
 @tool(description="Check a Python file for syntax errors")

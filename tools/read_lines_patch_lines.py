@@ -6,17 +6,24 @@ from typing import Optional
 from tool_base import tool
 import re
 import glob as glob_mod
+from tools_security.validate_path import validate_path as _validate_path
 
 read_lines_tuple3 = None
 
-# Reusing safety logic from the provided example
-def _validate_path(path: str) -> Optional[str]:
-    normalized = os.path.normpath(path)
-    parts = normalized.split(os.sep)
-    if ".." in parts:
-        return (
-            f"Blocked by safety check: path contains '..' traversal: {path}"
-        )
+
+def _entropy_reason(path: str) -> Optional[str]:
+    """Return the entropy rejection reason for a file, or None if it passes."""
+    try:
+        with open(path, "rb") as f:
+            raw_content = f.read()
+    except Exception:
+        return None
+
+    from security.entropychecker import EntropyChecker
+
+    result = EntropyChecker().feed(raw_content)
+    if result.is_suspicious:
+        return result.reason
     return None
 
 @tool(description="Provides help and usage instructions for the read_lines and patch_lines tools.")
@@ -44,6 +51,9 @@ def grep_from_file(pattern: str, path: str) -> str:
 
     matches = []
     try:
+        reason = _entropy_reason(path)
+        if reason is not None:
+            return f"Error: File {path} rejected by entropy check: {reason}"
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             for i, line in enumerate(f.readlines(), 1):
                 if re.search(pattern, line):
@@ -64,6 +74,9 @@ def grepF_from_file(needle: str, path: str) -> str:
 
     matches = []
     try:
+        reason = _entropy_reason(path)
+        if reason is not None:
+            return f"Error: File {path} rejected by entropy check: {reason}"
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             for i, line in enumerate(f.readlines(), 1):
                 if re.search(re.escape(needle), line):
@@ -90,6 +103,10 @@ def read_lines(path: str, from_line: int, to_line: int) -> str:
 
     if from_line >to_line :
         return f"Error: from_line >to_line"
+
+    reason = _entropy_reason(path)
+    if reason is not None:
+        return f"Error: File {path} rejected by entropy check: {reason}"
 
     with open(path, "r", encoding="utf-8") as f:
         # return ''.join( f.readlines( to_line - from_line)[from_line:]) # readlines is buggy (0 reads all lines)
