@@ -339,6 +339,7 @@ def run_with_tools(
             output_logger.new_slice()
 
         response_content = ""
+        response_thinking = ""
         response_tool_calls = None
         think_text = ""
         round_prompt_eval_count = None
@@ -391,6 +392,7 @@ def run_with_tools(
                             print(color_util.colored(msg.thinking, color_util.C_THINK, use_color), end='', flush=True)
                         if thought_logger:
                             thought_logger.write_thought(msg.thinking)
+                        response_thinking += msg.thinking
 
                     if msg.content:
                         if think_state:
@@ -453,9 +455,14 @@ def run_with_tools(
             )
 
         if response_tool_calls:
+            combined_content = ""
+            if response_thinking:
+                combined_content += f"<thought>\n{response_thinking}\n</thought>\n\n"
+            combined_content += response_content
+
             assistant_msg = {
                 "role": "assistant",
-                "content": response_content or None,
+                "content": combined_content or None,
                 "tool_calls": [
                     {
                         "function": {
@@ -472,7 +479,32 @@ def run_with_tools(
             messages.append(assistant_msg)
             if ndjson_log_file_handle:
                 from .logging import _log_ndjson_message
-                _log_ndjson_message(ndjson_log_file_handle, model, assistant_msg)
+                if response_thinking:
+                    thought_msg = {
+                        "role": "assistant",
+                        "content": response_thinking,
+                        "mode": "thinking"
+                    }
+                    _log_ndjson_message(ndjson_log_file_handle, model, thought_msg)
+                
+                if response_thinking:
+                    output_msg = {
+                        "role": "assistant",
+                        "content": response_content or None,
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": dict(tc.function.arguments),
+                                }
+                            }
+                            for tc in response_tool_calls
+                        ],
+                        "mode": "output",
+                    }
+                    _log_ndjson_message(ndjson_log_file_handle, model, output_msg)
+                else:
+                    _log_ndjson_message(ndjson_log_file_handle, model, assistant_msg)
 
             for tc in response_tool_calls:
                 tool_name = tc.function.name
@@ -636,10 +668,27 @@ def run_with_tools(
             if show_thinking and think_text.strip():
                 assistant_msg["thinking"] = think_text
             _stamp_message(assistant_msg)
+
             messages.append(assistant_msg)
             if ndjson_log_file_handle:
                 from .logging import _log_ndjson_message
-                _log_ndjson_message(ndjson_log_file_handle, model, assistant_msg)
+                if response_thinking:
+                    thought_msg = {
+                        "role": "assistant",
+                        "content": response_thinking,
+                        "mode": "thinking"
+                    }
+                    _log_ndjson_message(ndjson_log_file_handle, model, thought_msg)
+
+                    output_msg = {
+                        "role": "assistant",
+                        "content": response_content or None,
+                        "mode": "output",
+                    }
+                    _log_ndjson_message(ndjson_log_file_handle, model, output_msg)
+                else:
+                    _log_ndjson_message(ndjson_log_file_handle, model, assistant_msg)
+
             final_response = response_content
             state_manager.transition_to(ExecutionState.IDLE)
             break
