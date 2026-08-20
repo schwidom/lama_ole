@@ -1,0 +1,1 @@
+Because the thinking part in the history can be quite big it should not be displayed by default. An extra flag should be implemented for this.
