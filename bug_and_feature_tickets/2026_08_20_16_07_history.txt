@@ -1,0 +1,11 @@
+
+/history : outputting and thinking should be separated.
+
+(ins)[build] [ctx 130/25,000 ░░░░░░░░░░ 1%] >>> /history -1
+[2] [2026-08-20 16:05:48] ASSISTANT: <think> Okay, the user said "Hi". I need to respond appropriately. Since it's just a greeting, I should reply politely. Maybe say hello back and offer help. Let me check if there's any specific context, but since there's none, keep it simple. Perhaps ask how I can assist them today. Keep it friendly and open-ended. Alright, let's go with that.
+</think>
+
+Hi! How can I assist you today? Feel free to ask questions or let me know if you need help with anything specific! 😊
+(ins)[build] [ctx 130/25,000 ░░░░░░░░░░ 1%] >>> 
+
+
