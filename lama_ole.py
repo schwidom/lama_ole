@@ -34,6 +34,7 @@ from tool_base import (
     DEFAULT_CTX_COMPACT_THRESHOLD,
 )
 import color_util
+import history as history_mod
 from chat import (
     ChatState,
     _drop_incomplete_trailing_messages,
@@ -163,7 +164,7 @@ def build_parser():
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version="0.0.63"
+        version="0.0.64"
     )
     # Define arguments
     parser.add_argument(
@@ -941,6 +942,7 @@ def main():
                         color=args.color,
                         state_manager=state.state_manager,
                         metrics=metrics,
+                        output_format=history_mod.parse_output_format(),
                     )
                     state.ctx_usage = metrics
                     state.ctx_usage_model = args.model
