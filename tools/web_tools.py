@@ -9,6 +9,8 @@ from html.parser import HTMLParser
 
 from tool_base import tool
 
+import requests 
+
 
 class _TextExtractor(HTMLParser):
     def __init__(self):
@@ -69,8 +71,57 @@ def web_fetch_text(url: str, timeout: int = 15) -> str:
     return text
 
 
-@tool(description="Search the web using a search engine")
-def web_search(query: str, timeout: int = 15) -> str:
+# @tool(description="Search the web using a search engine")
+# def web_search_yacy(query: str, timeout: int = 15) -> str:
+#     import urllib.parse
+# 
+#     encoded = urllib.parse.quote(query)
+#     url = f"http://localhost:8090/yacysearch.json?query={encoded}"
+# 
+#     return web_fetch(url, timeout=timeout)
+
+
+cached_startRecord = 0 # + 10
+cached_query = ""
+
+@tool(description="Search the web using the yacy search engine, provides first 10 results via tool yacy_get_result_page() ")
+def web_search_yacy(query):
+    global cached_startRecord
+    global cached_query
+    # API abrufen
+    cached_startRecord = 0
+    cached_query = f"{query}"
+
+    # response = requests.get(f"http://localhost:8090/yacysearch.json?query={query}").json()
+    # cached_results = response["channels"][0]["items"] # all items
+    
+    return yacy_get_result_page()
+
+@tool(description=" Provides the next results from the previous web_search_yacy call ( can be continued ) ")
+def yacy_get_result_page():
+    global cached_startRecord
+    global cached_query
+
+    request = f"http://localhost:8090/yacysearch.json?query={cached_query}&startRecord={cached_startRecord}"
+
+    response = requests.get(request).json()
+    results = response["channels"][0]["items"] # all items
+
+
+    if 0 == len( results) :
+        return {"status": "error", "message": f"no more data"}
+
+    start = cached_startRecord
+    cached_startRecord += len( results)
+
+    return { "status":"success", "data" : {
+        "results": results,
+        "current_window": f"{start} to {cached_startRecord}"
+           } }
+
+
+@tool(description="Search the web using another search engine")
+def web_search_duckduckgo(query: str, timeout: int = 15) -> str:
     import urllib.parse
 
     encoded = urllib.parse.quote(query)
