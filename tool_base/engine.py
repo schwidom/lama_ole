@@ -707,6 +707,19 @@ def run_with_tools(
 
 
 def to_ollama_tools(tools: List[Tool]) -> List[OllamaTool]:
+    """Converts a list of internal Tool objects into OllamaTool objects.
+
+    Iterates through the provided tools and transforms their parameters, 
+    including type, description, and enum values, into the format 
+    required by the Ollama API's tool-calling specification.
+
+    Args:
+        tools (List[Tool]): A list of Tool objects containing function definitions.
+
+    Returns:
+        List[OllamaTool]: A list of formatted OllamaTool objects.
+    """
+
     result = []
     for t in tools:
         params = t.parameters
