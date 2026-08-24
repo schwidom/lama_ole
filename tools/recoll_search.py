@@ -5,14 +5,28 @@ from tool_base import tool
 cached_recoll_query = ""
 cached_recoll_total = 0
 cached_recoll_current_index = 0
+cached_recoll_db = None # if set close and reinitialize in recoll_search, in recoll_get_next_page use it
 
-@tool(description="Search the local Recoll database. Returns the first 10 results.")
-def recoll_search(query: str) -> dict:
+@tool(description="Search the local Recoll database. Returns up to the first 10 results.")
+def recoll_search(query: str, maxcount = 10) -> dict:
     """
-    Executes a search in the Recoll database and returns the first 10 matches.
+    Executes a search in the Recoll database and returns the first up to 10 matches.
     Sets up pagination state for subsequent calls to recoll_get_next_page.
     """
-    global cached_recoll_query, cached_recoll_total, cached_recoll_current_index
+    global cached_recoll_query, cached_recoll_total, cached_recoll_current_index, cached_recoll_db
+
+
+    maxcount = maxcount or 10
+
+    if not isinstance( maxcount, int) :
+        maxcount = int( maxcount)
+       
+    if maxcount > 10:
+        maxcount = 10
+
+    if cached_recoll_db :
+        cached_recoll_db.close()
+        cached_recoll_db = None
 
     try:
         db = recoll.connect()
@@ -23,48 +37,38 @@ def recoll_search(query: str) -> dict:
         cached_recoll_query = query
         cached_recoll_total = count
         cached_recoll_current_index = 0
+        cached_recoll_db = q
 
         if count == 0:
             return {"status": "success", "data": {"results": [], "total_found": 0}}
 
-        results = []
-        # Fetch up to the first 10 results
-        for _ in range(min(10, count)):
-            doc = q.next()
-            if doc:
-                results.append({
-                    "title": doc.get('title'),
-                    "filename": doc.get('filename'),
-                    "url": doc.get('url'),
-                    "abstract": doc.get('abstract')
-                })
+        return recoll_get_next_page( maxcount = maxcount )
 
-        return {
-            "status": "success",
-            "data": {
-                "results": results,
-                "total_found": count,
-                "current_range": f"0 to {len(results)}"
-            }
-        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@tool(description="Provides the next 10 results from the previous recoll_search call.")
-def recoll_get_next_page() -> dict:
+@tool(description="Provides the next up to 10 results from the previous recoll_search call.")
+def recoll_get_next_page( maxcount = 10 ) -> dict:
     """
     Retrieves the next batch of up to 10 results based on the last recoll_search.
     Returns an error if no search is active or no more results are available.
     """
-    global cached_recoll_query, cached_recoll_total, cached_recoll_current_index
+    global cached_recoll_query, cached_recoll_total, cached_recoll_current_index, cached_recoll_db
+
+    maxcount = maxcount or 10
+
+    if not isinstance( maxcount, int) :
+        maxcount = int( maxcount)
+       
+    if maxcount > 10:
+        maxcount = 10
 
     if not cached_recoll_query:
         return {"status": "error", "message": "No active search. Please run recoll_search first."}
 
     try:
-        db = recoll.connect()
-        q = db.query()
-        q.execute(cached_recoll_query)
+        q = cached_recoll_db
+        # q.execute(cached_recoll_query)
 
         # Advance the iterator to the current position in the result set
         for _ in range(cached_recoll_current_index):
@@ -74,7 +78,7 @@ def recoll_get_next_page() -> dict:
         results = []
         # Calculate how many items are left to fetch
         remaining = cached_recoll_total - cached_recoll_current_index
-        items_to_fetch = min(10, remaining)
+        items_to_fetch = min(maxcount, remaining)
 
         for _ in range(items_to_fetch):
             doc = q.next()
