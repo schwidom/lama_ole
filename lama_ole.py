@@ -23,13 +23,14 @@ _cwd = os.getcwd()
 if _cwd not in sys.path:
     sys.path.insert(0, _cwd)
 
+from parameters import PARAMETERS, process_inspection_flags
 from tool_base import (
-    get_tool_modules_info,
     load_tools,
     set_ollama_host,
     set_vision_models,
     to_ollama_tools,
     run_with_tools,
+    get_tool_modules_info,
     sanitize_ctx_threshold,
     DEFAULT_CTX_COMPACT_THRESHOLD,
 )
@@ -159,366 +160,49 @@ def build_parser():
         description="A CLI tool to interact with an Ollama instance.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Define arguments
-    parser.add_argument(
-        "-V", "--version",
-        action="version",
-        version="0.0.65"
-    )
-    # Define arguments
-    parser.add_argument(
-        "--host",
-        type=str,
-        default=_env_str("LAMA_OLE_HOST", "http://localhost:11434"),
-        help="The host of the ollama instance (e.g. http://localhost:11434)"
-    )
-    parser.add_argument(
-        "-m", "--model",
-        type=str,
-        default=_env_str("LAMA_OLE_MODEL", None),
-        help="The model name to use (e.g., gemma2:2b)"
-    )
-    parser.add_argument(
-        "-i", "--input",
-        type=str,
-        help="The input string to send to the model"
-    )
-    parser.add_argument(
-        "-f", "--inputfile",
-        type=str,
-        help="Path to a file to be used as input"
-    )
-    parser.add_argument(
-        "--stdin",
-        action="store_true",
-        help="If set, read the input from standard input instead of --input or --inputfile"
-    )
-    parser.add_argument(
-        "-t", "--thinking",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("LAMA_OLE_THINKING", False),
-        help="If set, output the model's thought process to the console"
-    )
-    # parameter for thoughts
-    parser.add_argument(
-        "--thoughtlog",
-        type=str,
-        help="Path to a log file where the model's thoughts should be saved (independently of -t)"
-    )
-    # Added requested parameter: -o or --outlog
-    parser.add_argument(
-        "-o", "--outlog",
-        type=str,
-        help="Path to a log file where the main output of the model should be saved"
-    )
-    # Parameter for tool calls log file (similar to -v but writes to a file)
-    parser.add_argument(
-        "--toolcalllog",
-        type=str,
-        help="Path to a log file where tool calls should be logged (similar to -v output)"
-    )
+    for spec in PARAMETERS:
+        kwargs = {}
+        if spec.help:
+            kwargs["help"] = spec.help
+        if spec.action:
+            kwargs["action"] = spec.action
+        if spec.choices:
+            kwargs["choices"] = spec.choices
+        if spec.nargs is not None:
+            kwargs["nargs"] = spec.nargs
+        if spec.metavar is not None:
+            kwargs["metavar"] = spec.metavar
+        if spec.dest:
+            kwargs["dest"] = spec.dest
 
-    # Parameter for chat input log file
-    parser.add_argument(
-        "--chatinputlog",
-        type=str,
-        help="Path to a log file where all user input (stdin, --input/--inputfile, and chat REPL) should be logged with timestamps"
-    )
-    # Parameter: ndjson conversation log
-    parser.add_argument(
-        "--logndjson",
-        type=str,
-        help="Path to a newline-delimited JSON log file where every conversation message is appended as its own line"
-    )
-    # Parameter: temperature
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=_env_float("LAMA_OLE_TEMPERATURE", 0.0),
-        help="Set the sampling temperature (e.g., 0.7)"
-    )
+        if spec.action == "version":
+            kwargs["version"] = spec.help
+            kwargs.pop("help", None)
+            parser.add_argument(*spec.flags, **kwargs)
+            continue
 
-    # Parameter: num_ctx
-    parser.add_argument(
-        "--num_ctx",
-        type=int,
-        default=_env_int("LAMA_OLE_NUM_CTX", None),
-        help="Set the context window (e.g., 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576)"
-    )
+        if spec.type and spec.action not in ("store_true", "store_false", "count", argparse.BooleanOptionalAction):
+            kwargs["type"] = spec.type
 
-    # Parameter: num_gpu
-    parser.add_argument(
-        "--num_gpu",
-        type=int,
-        default=_env_int("LAMA_OLE_NUM_GPU", None),
-        help="Set the amount of GPU cores"
-    )
+        # Compute dynamic default from env/config
+        if spec.env_var and spec.action != "append":
+            if spec.type is int:
+                default_val = _env_int(spec.env_var, spec.default)
+            elif spec.type is float:
+                default_val = _env_float(spec.env_var, spec.default)
+            elif spec.type is _env_bool or spec.action == argparse.BooleanOptionalAction or (callable(spec.type) and "bool" in getattr(spec.type, "__name__", "")):
+                default_val = _env_bool(spec.env_var, spec.default)
+            elif spec.choices:
+                default_val = _env_choice(spec.env_var, spec.default, spec.choices)
+            else:
+                default_val = _env_str(spec.env_var, spec.default)
+        else:
+            default_val = spec.default
 
-    # Parameter: keep_alive
-    parser.add_argument(
-        "--keep_alive",
-        type=str,
-        default=_env_str("LAMA_OLE_KEEP_ALIVE", None),
-        help="Keep model in memory (e.g., '5m', '1h' or a number of seconds)"
-    )
+        if spec.action not in ("store_true", "store_false"):
+            kwargs["default"] = default_val
 
-    # Parameter: list
-    parser.add_argument(
-        "-l", "--list",
-        action="store_true",
-        help="List all available models and exit"
-    )
-
-    # Parameter: list
-    parser.add_argument(
-        "--ps",
-        action="store_true",
-        help="List all running models and exit"
-    )
-
-    # Parameter: stop a loaded model
-    parser.add_argument(
-        "--stop",
-        type=str,
-        metavar="MODEL",
-        help="Stop/unload a running model (e.g., 'gemma2:2b')"
-    )
-
-    # Parameter: ollama websearch
-    parser.add_argument(
-        "--ollama_websearch",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("LAMA_OLE_OLLAMA_WEBSRCH", False),
-        help="Activate Ollama's built-in web search tool"
-    )
-
-    # Parameter: verbose (repeatable for levels)
-    parser.add_argument(
-        "-v", "--verbose",
-        action="count",
-        default=_env_int("LAMA_OLE_VERBOSE", 0),
-        help="Increase verbosity level (repeat: -v, -vv, -vvv)"
-    )
-
-    # Parameter: chat
-    parser.add_argument(
-        "--chat",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("LAMA_OLE_CHAT", False),
-        help="Start an interactive chat REPL session"
-    )
-
-    # Parameter: resume
-    parser.add_argument(
-        "--resume",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("LAMA_OLE_RESUME", True),
-        help="Automatically resume the most recent session for the current "
-             "directory on startup (use --no-resume to always start fresh)"
-    )
-
-    # Parameter: autosave
-    parser.add_argument(
-        "--autosave",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("LAMA_OLE_AUTOSAVE", True),
-        help="Automatically save the current chat session to disk after every "
-             "turn and on exit (use --no-autosave to stop writing session files)"
-    )
-
-    # Parameter: show diff (default on)
-    parser.add_argument(
-        "--diff",
-        action=argparse.BooleanOptionalAction,
-        dest="show_diff",
-        default=_env_bool("LAMA_OLE_SHOW_DIFF", True),
-        help="Show a colored unified diff of each file write (edit/create/"
-             "append/apply_patch) in the output (use --no-diff to hide it)"
-    )
-
-    # Parameter: color
-    parser.add_argument(
-        "--color",
-        type=str,
-        default=_env_choice("LAMA_OLE_COLOR", "auto", ["auto", "always", "never", "none"]),
-        choices=["auto", "always", "never", "none"],
-        help="Colorize user input, thinking, and LLM output: 'auto' (TTY only), 'always', or 'never'/'none'"
-    )
-
-    # Parameter: context window meter
-    parser.add_argument(
-        "--ctx-meter",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("LAMA_OLE_CTX_METER", True),
-        help="Show a context-window usage meter in chat mode (live prompt gauge). "
-             "The window size is taken from --num_ctx, LAMA_OLE_CTX_SIZE, or the running model"
-    )
-
-    # Parameter: context compaction
-    parser.add_argument(
-        "--auto-compact",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("LAMA_OLE_AUTO_COMPACT", False),
-        help="Enable auto-compaction: when the context window crosses the "
-             "threshold, summarize older context (keeping recent turns verbatim)"
-    )
-    parser.add_argument(
-        "--auto-compact-threshold",
-        type=sanitize_ctx_threshold,
-        default=sanitize_ctx_threshold(
-            _env_float("LAMA_OLE_AUTO_COMPACT_THRESHOLD", DEFAULT_CTX_COMPACT_THRESHOLD)
-        ),
-        help="Fraction of the context window at which auto-compaction triggers "
-             "(must be in (0, 1])"
-    )
-    parser.add_argument(
-        "--auto-compact-model",
-        type=str,
-        default=_env_str("LAMA_OLE_AUTO_COMPACT_MODEL", None),
-        help="Model used to produce compaction summaries (falls back to the chat model)"
-    )
-
-    # Parameter: safe
-    parser.add_argument(
-        "--safe",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("LAMA_OLE_SAFE", False),
-        help="Enable user confirmation before dangerous tool operations"
-    )
-
-    # Parameter: mode
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default=_env_choice("LAMA_OLE_MODE", "build", ["build", "plan"]),
-        choices=["build", "plan"],
-        help="Chat agent mode: 'build' (full tools, changes allowed) or "
-             "'plan' (all tools advertised, write tools blocked until /build)"
-    )
-
-    # Parameter: tool (repeatable)
-    parser.add_argument(
-        "--tool",
-        type=str,
-        action="append",
-        dest="tools",
-        default=None,
-        help="Python module name providing tool functions (can be repeated); "
-             "appends to tools configured via LAMA_OLE_TOOL"
-    )
-
-    # Parameter: skill (repeatable)
-    parser.add_argument(
-        "--skill",
-        type=str,
-        action="append",
-        dest="skills",
-        default=None,
-        help="Path to a skill file whose text is loaded into the system role "
-             "(can be repeated; files are concatenated); appends to skills "
-             "configured via LAMA_OLE_SKILL"
-    )
-
-    # Parameter: ignore-config-tools
-    parser.add_argument(
-        "--ignore-config-tools",
-        action="store_true",
-        help="Ignore tools configured via LAMA_OLE_TOOL (shell/env/config) "
-             "for this run; only --tool values are used"
-    )
-
-    # Parameter: max_tool_rounds
-    parser.add_argument(
-        "--max_tool_rounds",
-        type=int,
-        default=_env_int("LAMA_OLE_MAX_TOOL_ROUNDS", None),
-        help="Maximum number of tool-calling rounds (no limit when unset)"
-    )
-
-    # Parameter: vision_model (repeatable)
-    parser.add_argument(
-        "--vision_model",
-        type=str,
-        action="append",
-        dest="vision_models",
-        default=None,
-        help="Vision model name available for media understanding tools (can be repeated)"
-    )
-
-    # Parameter: help-tools
-    parser.add_argument(
-        "--help-tools",
-        action="store_true",
-        help="Show documentation for loaded tool modules and exit"
-    )
-
-    # Parameter: transfer
-    parser.add_argument(
-        "--transfer",
-        nargs=2,
-        metavar=("SOURCE", "DEST"),
-        help="Transfer a model from SOURCE to DEST ollama instance"
-    )
-
-    # Parameter: serve-blobs
-    parser.add_argument(
-        "--serve-blobs",
-        action="store_true",
-        help="Start a blob HTTP server for remote transfer"
-    )
-    parser.add_argument(
-        "--blob-host",
-        type=str,
-        default="127.0.0.1",
-        help="Host to bind blob server"
-    )
-    parser.add_argument(
-        "--blob-port",
-        type=int,
-        default=0,
-        help="Port for blob server (0 = random)"
-    )
-
-    # Parameter: max_tool_rounds_continuation
-    parser.add_argument(
-        "--max_tool_rounds_continuation",
-        type=str,
-        default=_env_choice(
-            "LAMA_OLE_MAX_TOOL_ROUNDS_CONTINUATION", "ask", ["ask", "fallback"]
-        ),
-        choices=["ask", "fallback"],
-        help="Behavior when max_tool_rounds is reached: 'ask' (interactive menu) or 'fallback' (silent default)"
-    )
-
-    # Parameter: system_prompt
-    parser.add_argument(
-        "--system_prompt",
-        type=str,
-        default=_env_str("LAMA_OLE_SYSTEM_PROMPT", None),
-        help="The system prompt"
-    )
-
-    # Parameter: system_prompt_file
-    parser.add_argument(
-        "--system_prompt_file",
-        type=str,
-        default=_env_str("LAMA_OLE_SYSTEM_PROMPT_FILE", None),
-        help="The system prompt read from a file"
-    )
-
-    # Parameter: no_safety_system_prompt
-    parser.add_argument(
-        "--no_safety_system_prompt",
-        action="store_true",
-        help="Enables potential takeover when tools are used, it is placed after the system prompt, if given"
-    )
-
-    # Parameter: debug
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Initialize the environment and enter interactive mode"
-    )
+        parser.add_argument(*spec.flags, **kwargs)
 
     return parser
 
@@ -645,7 +329,16 @@ def _resume_session_into(state, resume):
 
 
 def main():
+    initial_env = dict(os.environ)
+    config_dict = {}
+    for path in (_ENV_FILE_USER, _ENV_FILE_PROJECT):
+        config_dict.update(_parse_env_file(path))
+
     load_env_files()
+
+    if process_inspection_flags(sys.argv[1:], config_dict, initial_env):
+        sys.exit(0)
+
     args = build_parser().parse_args()
     _resolve_env_defaults(args)
 
