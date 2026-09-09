@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from tool_base import DEFAULT_CTX_COMPACT_THRESHOLD, sanitize_ctx_threshold
+from version import VERSION
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
@@ -50,7 +51,8 @@ PARAMETERS: List[ParameterSpec] = [
         name="version",
         flags=["-V", "--version"],
         action="version",
-        help="0.0.66",
+        # help="0.0.66",
+        help=VERSION,
     ),
     ParameterSpec(
         name="host",

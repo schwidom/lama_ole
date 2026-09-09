@@ -10,6 +10,7 @@ from parameters import (
     process_inspection_flags,
 )
 
+from version import VERSION
 
 def test_format_bash_c_quote_plain():
     assert format_bash_c_quote("hello") == "hello"
@@ -56,7 +57,7 @@ def _cli_module():
 def test_version_flag_standard_help_text():
     parser = _cli_module().build_parser()
     version_action = next(a for a in parser._actions if a.dest == "version")
-    assert version_action.version == "0.0.65"
+    assert version_action.version == VERSION
     assert version_action.help == "show program's version number and exit"
 
 
