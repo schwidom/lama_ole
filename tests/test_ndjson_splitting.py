@@ -3,15 +3,7 @@ import json
 import io
 from unittest.mock import MagicMock
 from tool_base.engine import run_with_tools
-
-class MockChunk:
-    """Mocks an Ollama response chunk."""
-    def __init__(self, content=None, thinking=None, tool_calls=None):
-        from unittest.mock import MagicMock
-        self.message = MagicMock()
-        self.message.content = content or ""
-        self.message.thinking = thinking or ""
-        self.message.tool_calls = tool_calls or []
+from backends.base import ChatChunk
 
 class TestNDJSONLogging(unittest.TestCase):
     def setUp(self):
@@ -22,7 +14,7 @@ class TestNDJSONLogging(unittest.TestCase):
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
             "loaded_tools": [],
-            "ollama_tools": None,
+            "backend_tools": None,
             "options": {},
             "keep_alive": True,
             "show_thinking": False,
@@ -33,8 +25,8 @@ class TestNDJSONLogging(unittest.TestCase):
     def test_split_thinking_and_output(self):
         # 1. Prepare Mock Stream: Chunk 1 (Thinking) -> Chunk 2 (Content)
         stream = [
-            MockChunk(thinking="I am thinking about this."),
-            MockChunk(content="The answer is 42.")
+            ChatChunk(thinking="I am thinking about this."),
+            ChatChunk(content="The answer is 42.")
         ]
         self.client.chat.return_value = iter(stream)
 
@@ -67,7 +59,7 @@ class TestNDJSONLogging(unittest.TestCase):
 
     def test_no_thinking_logs_single_message(self):
         # 1. Prepare Mock Stream: Only Content
-        stream = [MockChunk(content="Just a normal response.")]
+        stream = [ChatChunk(content="Just a normal response.")]
         self.client.chat.return_value = iter(stream)
 
         # 2. Execute

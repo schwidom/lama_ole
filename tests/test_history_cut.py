@@ -152,9 +152,8 @@ def test_stamp_message_idempotent():
 
 
 def test_run_with_tools_stamps_messages():
-    from types import SimpleNamespace
-
     from tool_base import run_with_tools
+    from backends.base import ChatChunk
 
     class FakeClient:
         def __init__(self, stream):
@@ -164,16 +163,10 @@ def test_run_with_tools_stamps_messages():
             return self._stream
 
     def chunk(name, args):
-        return SimpleNamespace(
-            message=SimpleNamespace(
-                thinking=None,
-                content=None,
-                tool_calls=[
-                    SimpleNamespace(
-                        function=SimpleNamespace(name=name, arguments=args)
-                    )
-                ],
-            )
+        return ChatChunk(
+            thinking=None,
+            content=None,
+            tool_calls=[{"function": {"name": name, "arguments": args}}],
         )
 
     messages = [{"role": "user", "content": "hi"}]
@@ -182,7 +175,7 @@ def test_run_with_tools_stamps_messages():
         model="m",
         messages=messages,
         loaded_tools=[],
-        ollama_tools=None,
+        backend_tools=None,
         options={},
         keep_alive=None,
         show_thinking=False,

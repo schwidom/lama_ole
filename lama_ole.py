@@ -11,7 +11,6 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from ollama import Client
 
 # Ensure the script's directory is in sys.path for sibling imports
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -24,11 +23,10 @@ if _cwd not in sys.path:
     sys.path.insert(0, _cwd)
 
 from parameters import PARAMETERS, process_inspection_flags
+from backends.factory import create_backend
 from tool_base import (
     load_tools,
-    set_ollama_host,
     set_vision_models,
-    to_ollama_tools,
     run_with_tools,
     get_tool_modules_info,
     sanitize_ctx_threshold,
@@ -352,13 +350,22 @@ def main():
         meter_high=_env_str("LAMA_OLE_COLOR_METER_HIGH", None),
     )
 
-    host_url = args.host
-    if not host_url.startswith(('http://', 'https://')) and ':' in host_url:
-        host_url = f"http://{host_url}"
-    client = Client(host=host_url)
+    # --host defaults to None; each backend supplies its own default (plus
+    # port/scheme normalization) via backends._compat.normalize_host.
+    client = create_backend(args.backend, host=args.host, api_key=args.api_key)
 
-    # Propagate host and vision models to tools
-    set_ollama_host(host_url)
+    if (
+        args.keep_alive is not None
+        and not getattr(client, "supports_keep_alive", False)
+    ):
+        print(
+            f"[WARNING] keep_alive is not supported by the '{args.backend}' "
+            "backend; it will be ignored.",
+            file=sys.stderr,
+        )
+
+    # Propagate vision models to tools (media understanding keeps talking to
+    # an Ollama endpoint directly, see LAMA_OLE_VISION_HOST).
     if args.vision_models:
         set_vision_models(args.vision_models)
 
@@ -368,27 +375,26 @@ def main():
         sys.exit(0)
 
     if args.list:
-        print( "available models:")
-        response = client.list()
-        for model in response.models:
-            print(model)
+        print("available models:")
+        for model in client.list_models():
+            print(model.name)
 
     if args.ps:
-        print( "running models:")
-        response = client.ps()
-        for model in response.models:
-            print(model)
-
+        print("running models:")
+        for model in client.list_running():
+            print(model.name)
 
     if args.list or args.ps:
-     sys.exit(0)
+        sys.exit(0)
 
     if args.stop:
-        client.generate(model=args.stop, keep_alive=0)
+        client.stop_model(args.stop)
         print(f"Stopped model: {args.stop}")
         sys.exit(0)
 
     if args.transfer:
+        from ollama import Client  # lazy import: transfer stays Ollama-only
+
         src_raw, dst_host = args.transfer
         dst_host = _normalize_host(dst_host)
         if not args.model:
@@ -424,17 +430,16 @@ def main():
             except Exception as e:
                 print(f"Error loading tool module '{module_name}': {e}", file=sys.stderr)
                 sys.exit(1)
-    ollama_tools = to_ollama_tools(loaded_tools) if loaded_tools else None
+    backend_tools = client.convert_tools(loaded_tools)
 
     if args.debug:
         import code
-        print(f"Debug mode: model={args.model}, host={host_url}")
+        print(f"Debug mode: model={args.model}, backend={args.backend}")
         local_vars = {
             'client': client,
             'loaded_tools': loaded_tools,
-            'ollama_tools': ollama_tools,
+            'backend_tools': backend_tools,
             'args': args,
-            'host_url': host_url,
             'sys': sys,
             'os': os,
         }
@@ -562,9 +567,12 @@ def main():
             state = ChatState(
                 client=client,
                 model=args.model,
+                backend_name=args.backend,
+                host=args.host,
+                api_key=args.api_key,
                 loaded_tools=loaded_tools,
                 loaded_tool_modules=list(args.tools or []),
-                ollama_tools=ollama_tools,
+                backend_tools=backend_tools,
                 options=options,
                 keep_alive=args.keep_alive,
                 show_thinking=args.thinking,
@@ -581,7 +589,7 @@ def main():
                 chatinput_file_handle=chatinput_file_handle,
                 max_tool_rounds=args.max_tool_rounds,
                 max_tool_rounds_continuation=args.max_tool_rounds_continuation,
-                ollama_websearch=args.ollama_websearch,
+                websearch=args.ollama_websearch,
                 ndjson_log_path=args.logndjson,
                 ndjson_log_file_handle=ndjson_log_file_handle,
                 color=args.color,
@@ -612,7 +620,7 @@ def main():
                         model=args.model,
                         messages=state.messages,
                         loaded_tools=loaded_tools,
-                        ollama_tools=ollama_tools,
+                        backend_tools=backend_tools,
                         options=options,
                         keep_alive=args.keep_alive,
                         show_thinking=args.thinking,
@@ -629,7 +637,7 @@ def main():
                         chatinput_file_handle=chatinput_file_handle,
                         max_tool_rounds=args.max_tool_rounds,
                         max_tool_rounds_continuation=args.max_tool_rounds_continuation,
-                        ollama_websearch=args.ollama_websearch,
+                        websearch=args.ollama_websearch,
                         ndjson_log_file_handle=ndjson_log_file_handle,
                         color=args.color,
                         state_manager=state.state_manager,
@@ -661,7 +669,7 @@ def main():
                 model=args.model,
                 messages=messages,
                 loaded_tools=loaded_tools,
-                ollama_tools=ollama_tools,
+                backend_tools=backend_tools,
                 options=options,
                 keep_alive=args.keep_alive,
                 show_thinking=args.thinking,
@@ -678,7 +686,7 @@ def main():
                 chatinput_file_handle=chatinput_file_handle,
                 max_tool_rounds=args.max_tool_rounds,
                 max_tool_rounds_continuation=args.max_tool_rounds_continuation,
-                ollama_websearch=args.ollama_websearch,
+                websearch=args.ollama_websearch,
                 ndjson_log_file_handle=ndjson_log_file_handle,
                 color=args.color,
             )

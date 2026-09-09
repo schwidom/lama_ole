@@ -2,7 +2,8 @@
 
 # lama_ole
 
-A CLI tool to interact with **Ollama** instances. Supports streaming chat, tool
+A CLI tool to interact with **local LLM backends** — Ollama, llama.cpp, and any
+OpenAI-compatible API. Supports streaming chat, tool
 calling, thinking-process handling, media understanding (image/video/audio), and
 flexible input/output options.
 
@@ -14,6 +15,9 @@ lama_ole.py --host localhost -m gemma4:26b-a4b-it-qat --chat -t -v --tool tools.
 ## Features
 
 - **Streaming Support** — Real-time output as the model generates text.
+- **Multiple Backends** — Interact with Ollama, llama.cpp, or any
+  OpenAI-compatible API via `--backend`; built-in `eliza`/`echo` mock backends
+  for offline testing.
 - **Thinking Process** — Display or save the model's internal thought process
   (`-t`, `--thoughtlog`).
 - **Output Redirection** — Save generated content to a log file (`-o`, `--outlog`).
@@ -43,9 +47,10 @@ lama_ole.py --host localhost -m gemma4:26b-a4b-it-qat --chat -t -v --tool tools.
 
 ## Prerequisites
 
-1. **Ollama** installed and running ([ollama.com](https://ollama.com)).
-2. **Python 3.9+**.
-3. The `ollama` Python library.
+1. **Python 3.9+**.
+2. The `ollama` Python library — only needed for the default `ollama` backend;
+   the other backends (llama.cpp, OpenAI-compatible, mocks) don't use it. The
+   library is imported lazily, so lama_ole runs fine without it installed.
 
 ### Installation
 
@@ -91,6 +96,44 @@ With an initial system message:
 ```bash
 python3 lama_ole.py --chat -m llama3.2:3b -i "You are a helpful assistant."
 ```
+
+## Backends
+
+lama_ole talks to an LLM through a pluggable backend. Choose one with
+`--backend` (or `LAMA_OLE_BACKEND`); the default is `ollama`.
+
+| Backend | Description | Default host | API key |
+|---------|-------------|--------------|---------|
+| `ollama` | Ollama, via the `ollama` Python library | `http://localhost:11434` | not required |
+| `llamacpp` | llama.cpp server (OpenAI-compatible API) | `http://localhost:8080` | not required |
+| `openai_compat` | Any OpenAI-compatible endpoint (e.g. vLLM, TGI) | `https://localhost:443` | `--api-key` |
+| `eliza` | Built-in scripted mock (no server needed) | `http://localhost:80` | — |
+| `echo` | Built-in echo mock (no server needed) | `http://localhost:80` | — |
+
+```bash
+python3 lama_ole.py --backend ollama -m gemma2:2b -i "hello"
+python3 lama_ole.py --backend llamacpp -m phi-3-mini -i "hello"
+python3 lama_ole.py --backend openai_compat --host https://api.example.com \
+    --api-key sk-... -m gpt-4o-mini -i "hello"
+python3 lama_ole.py --backend echo -m any -i "build a robot"
+```
+
+- `--host` defaults to `None`; each backend supplies its own scheme and port
+  (see table above). Pass a bare host (`myserver`), host + port
+  (`myserver:8080`), or a full URL — a missing scheme/port is filled in with
+  the backend's default.
+- `--api-key` (or `LAMA_OLE_API_KEY`) is handed to backends that need it
+  (`openai_compat`); backends that don't (ollama, llamacpp) ignore it.
+- Backend libraries are loaded lazily: the `ollama` package is imported only
+  when the `ollama` backend is used, so the CLI works without it installed.
+- Model transfer (`--transfer`) is Ollama-only.
+- Thinking: Echo/Eliza fake `*thinking*`; OpenAI reasoning models (`o1`/`o3`)
+  map their `reasoning_content` field to the thinking stream.
+- `keep_alive` is an Ollama option; other backends ignore it with a warning.
+
+In chat mode, `/backend <name>` switches backend mid-session: the current model
+is snapshotted per backend and restored when you switch back. A fresh backend
+with no recorded model keeps the current model name.
 
 ## Tool Calling
 
@@ -338,6 +381,7 @@ In chat mode (`--chat`), lines starting with `/` are commands:
 | `/new` | Start a new session (the previous session is preserved and can be restored with `/resume`) |
 | `/compact [auto on\|off]` | Compact the context now (summarize older turns, keep recent verbatim), or toggle/show auto-compaction |
 | `/model <name>` | Switch to a different model |
+| `/backend [name]` | Show the current backend, or switch to a different backend (model is snapshotted per backend) |
 | `/plan` | Switch to plan mode (write tools blocked until `/build`) |
 | `/build` | Switch to build mode (full tools, changes allowed) |
 | `/save <path>` | Save the conversation to a JSON file (model, messages, active skill, system prompt and loaded toolsets) |
@@ -570,7 +614,9 @@ to generate when you pressed Ctrl-C.
 | :--- | :--- | :--- |
 | `-h, --help` | Show help message and exit | |
 | `-V, --version` | Show program version and exit | |
-| `--host HOST` | Ollama instance host | `http://localhost:11434` |
+| `--backend NAME` | LLM backend: `ollama`, `llamacpp`, `openai_compat`, `eliza`, `echo` | `ollama` |
+| `--api-key KEY` | API key for backends that require authentication | |
+| `--host HOST` | Host endpoint of the chosen backend (each backend defines its own default) | backend-specific |
 | `-m, --model MODEL` | Model name to use | (required) |
 | `-i, --input TEXT` | Input string for the model | |
 | `-f, --inputfile PATH` | Read input from a file | |
@@ -813,6 +859,8 @@ the configured default.
 
 | Variable | Type | Flag |
 | :--- | :--- | :--- |
+| `LAMA_OLE_BACKEND` | string | `--backend` |
+| `LAMA_OLE_API_KEY` | string | `--api-key` |
 | `LAMA_OLE_HOST` | string | `--host` |
 | `LAMA_OLE_MODEL` | string | `-m, --model` |
 | `LAMA_OLE_TEMPERATURE` | number | `--temperature` |
@@ -871,8 +919,8 @@ config files.
 
 ## Troubleshooting
 
-- **Connection Error** — Ensure Ollama is running and `--host` matches your
-  setup (default `http://localhost:11434`).
+- **Connection Error** — Ensure the chosen backend is running and `--host`
+  matches your setup (see the [Backends](#backends) table for default hosts).
 - **File Exists Error** — The script refuses to overwrite existing files.
   Remove the target file first or use a different path.
 - **Missing Library** — Run `pip install ollama`. For media tools, also

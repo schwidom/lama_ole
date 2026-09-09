@@ -10,7 +10,6 @@ Covers:
 
 import os
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +19,7 @@ if lama_ole_dir not in sys.path:
     sys.path.insert(0, lama_ole_dir)
 
 import chat  # noqa: E402
+from backends.base import ChatChunk  # noqa: E402
 from tool_base import (  # noqa: E402
     Tool,
     EscapeSequenceParser,
@@ -111,13 +111,11 @@ def test_typeahead_split_utf8_byte_by_byte():
 
 
 def _chunk(content=None, tool_calls=None):
-    return SimpleNamespace(
-        message=SimpleNamespace(thinking=None, content=content, tool_calls=tool_calls)
-    )
+    return ChatChunk(thinking=None, content=content, tool_calls=tool_calls)
 
 
 def _tool_call(name, arguments):
-    return SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
+    return {"function": {"name": name, "arguments": arguments}}
 
 
 class FakeClient:
@@ -140,7 +138,7 @@ def _run_kwargs(client, messages, **extra):
         model="test",
         messages=messages,
         loaded_tools=[],
-        ollama_tools=None,
+        backend_tools=None,
         options={},
         keep_alive=None,
         show_thinking=False,
@@ -154,9 +152,9 @@ def _run_kwargs(client, messages, **extra):
 
 
 class MutableModeState:
-    def __init__(self, mode="build", ollama_tools=None):
+    def __init__(self, mode="build", backend_tools=None):
         self.mode = mode
-        self.ollama_tools = ollama_tools
+        self.backend_tools = backend_tools
 
 
 def _tools(called):
@@ -250,7 +248,7 @@ def test_write_tool_runs_in_build_mode():
 
 
 def test_mid_turn_flip_blocks_later_writes_without_changing_tools():
-    state = MutableModeState(mode="build", ollama_tools=["tools-v1"])
+    state = MutableModeState(mode="build", backend_tools=["tools-v1"])
     called = []
 
     def write_fn():
@@ -281,7 +279,7 @@ def test_mid_turn_flip_blocks_later_writes_without_changing_tools():
             client,
             messages,
             loaded_tools=tools,
-            ollama_tools=["tools-v1"],
+            backend_tools=["tools-v1"],
             mode_state=state,
         )
     )

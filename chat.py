@@ -20,7 +20,6 @@ from tool_base import (
     StateManager,
     ExecutionState,
     ExecutionInterrupted,
-    to_ollama_tools,
     load_tools,
     get_available_toolsets,
     get_tools_of_module,
@@ -44,15 +43,23 @@ from tool_base.engine import _print_diff_block
 
 import color_util
 
+from backends.factory import create_backend
+from backends.registry import SUPPORTED_BACKENDS
+
 
 @dataclass
 class ChatState:
     client: object
     model: str
+    backend_name: str = "ollama"
+    host: str = None
+    api_key: str = None
     messages: list = field(default_factory=list)
     loaded_tools: list[Tool] = field(default_factory=list)
     loaded_tool_modules: list = field(default_factory=list)
-    ollama_tools: object = None
+    backend_tools: object = None
+    last_used_model_by_backend: dict = field(default_factory=dict)
+    _warned_no_thinking_models: set = field(default_factory=set)
     options: dict = field(default_factory=dict)
     keep_alive: object = None
     show_thinking: bool = False
@@ -72,7 +79,7 @@ class ChatState:
     chatinput_file_handle: object = None
     max_tool_rounds: int = None
     max_tool_rounds_continuation: str = "ask"
-    ollama_websearch: bool = False
+    websearch: bool = False
     ndjson_log_path: str = None
     ndjson_log_file_handle: object = None
     color: object = "auto"
@@ -152,8 +159,8 @@ class ChatState:
                 return
         self.messages.insert(0, {"role": "system", "content": new_content})
 
-    def refresh_ollama_tools(self) -> None:
-        """Recompute the Ollama tool list from ``loaded_tools``.
+    def refresh_backend_tools(self) -> None:
+        """Recompute the backend tool list from ``loaded_tools``.
 
         Called after every runtime load/unload so the next turn advertises
         exactly the current set of tools. The full set is advertised in both
@@ -161,7 +168,11 @@ class ChatState:
         (see the engine's plan-mode gate), so the model always knows which
         tools exist and will work once build mode is active.
         """
-        self.ollama_tools = to_ollama_tools(self.loaded_tools) if self.loaded_tools else None
+        convert = getattr(self.client, "convert_tools", None)
+        if self.loaded_tools and callable(convert):
+            self.backend_tools = convert(self.loaded_tools)
+        else:
+            self.backend_tools = None
 
     def get_history_entries(self):
         """Returns a list of viewable history entries with numbering and type info."""
@@ -305,6 +316,7 @@ _COMMANDS = [
     "/new",
     "/compact",
     "/model",
+    "/backend",
     "/plan",
     "/build",
     "/save",
@@ -509,9 +521,9 @@ def _resolve_ctx_max(state: ChatState):
             pass
 
     try:
-        resp = state.client.ps()
-        for m in getattr(resp, "models", []) or []:
-            name = getattr(m, "model", None) or getattr(m, "name", None)
+        running = state.client.list_running()
+        for m in running or []:
+            name = getattr(m, "name", None)
             cl = getattr(m, "context_length", None)
             if name == state.model and cl:
                 return int(cl)
@@ -519,19 +531,15 @@ def _resolve_ctx_max(state: ChatState):
         pass
 
     try:
-        r = state.client.show(model=state.model)
-        params = getattr(r, "parameters", None)
-        if isinstance(params, str):
-            m = re.search(r"\bnum_ctx\s+(\d+)", params)
-            if m:
-                return int(m.group(1))
-        elif isinstance(params, dict):
-            nc = params.get("num_ctx")
-            if nc:
-                return int(nc)
-        for key, val in (getattr(r, "modelinfo", None) or {}).items():
-            if key.endswith(".context_length") and val:
-                return int(val)
+        info = state.client.show_model(state.model)
+        if info is not None:
+            if info.context_length:
+                return int(info.context_length)
+            for key, val in (getattr(info, "backend_specific", None) or {}).get(
+                "modelinfo", {}
+            ).items():
+                if key.endswith(".context_length") and val:
+                    return int(val)
     except Exception:
         pass
 
@@ -957,7 +965,7 @@ def run_compaction(state: ChatState, confirm: bool = True) -> bool:
             )
             try:
                 for chunk in stream:
-                    content = chunk.message.content
+                    content = getattr(chunk, "content", None) or ""
                     if not content:
                         continue
                     summary_parts.append(content)
@@ -1125,7 +1133,7 @@ def run_chat(state: ChatState):
                     model=state.model,
                     messages=state.messages,
                     loaded_tools=state.loaded_tools,
-                    ollama_tools=state.ollama_tools,
+                    backend_tools=state.backend_tools,
                     options=state.options,
                     keep_alive=state.keep_alive,
                     show_thinking=state.show_thinking,
@@ -1140,7 +1148,7 @@ def run_chat(state: ChatState):
                     chatinput_file_handle=state.chatinput_file_handle,
                     max_tool_rounds=state.max_tool_rounds,
                     max_tool_rounds_continuation=state.max_tool_rounds_continuation,
-                    ollama_websearch=state.ollama_websearch,
+                    websearch=state.websearch,
                     color=state.color,
                     ndjson_log_file_handle=state.ndjson_log_file_handle,
                     state_manager=state.state_manager,
@@ -1227,6 +1235,9 @@ def _handle_command(line: str, state: ChatState) -> bool:
                 state.ctx_usage_model = arg
             print(f"Switched to model: {arg}")
 
+    elif cmd == "/backend":
+        _cmd_backend(arg, state)
+
     elif cmd == "/plan":
         _set_mode(state, "plan")
 
@@ -1282,6 +1293,7 @@ def _show_help():
     print("  /new            Start a new session (previous session is preserved)")
     print("  /compact [auto on|off]  Compact now, or toggle/show auto-compaction")
     print("  /model <name>   Switch to a different model")
+    print("  /backend [name] Show the current backend, or switch to a different one")
     print("  /plan           Switch to plan mode (write tools blocked until /build)")
     print("  /build          Switch to build mode (full tools, changes allowed)")
     print("  /save <path>    Save the conversation to a JSON file")
@@ -1362,6 +1374,70 @@ def _cmd_compact_auto(arg: str, state: ChatState):
         print("Usage: /compact auto [on|off]")
 
 
+def _cmd_backend(arg: str, state: ChatState):
+    """Switch the active LLM backend (/backend [name]).
+
+    No argument shows the current backend and available choices. With an
+    argument, a fresh backend instance is created via ``create_backend`` and
+    swapped into ``state.client``. The current model is snapshotted into
+    ``last_used_model_by_backend`` before switching; returning to a backend
+    restores its last-used model. A fresh backend with no recorded model keeps
+    the current model name (the user's responsibility -- valid for the old
+    backend only, per decision 004A #5). Optional ``keep_alive`` is ignored
+    with a one-time warning when the new backend does not support it.
+    """
+    arg = arg.strip().lower()
+    if not arg:
+        print(f"Current backend: {state.backend_name}")
+        print(f"Available backends: {', '.join(SUPPORTED_BACKENDS)}")
+        print(f"Model: {state.model}")
+        return
+    if arg not in SUPPORTED_BACKENDS:
+        print(
+            f"Unknown backend '{arg}'. Available backends: "
+            f"{', '.join(SUPPORTED_BACKENDS)}"
+        )
+        return
+    if arg == state.backend_name:
+        print(f"Already using backend '{arg}'.")
+        return
+    try:
+        new_backend = create_backend(arg, host=state.host, api_key=state.api_key)
+    except Exception as e:
+        print(f"Error creating backend '{arg}': {e}")
+        return
+
+    old_backend = state.backend_name
+    old_client = state.client
+    state.last_used_model_by_backend[old_backend] = state.model
+    state.client = new_backend
+    state.backend_name = arg
+
+    saved = state.last_used_model_by_backend.get(arg)
+    if saved:
+        state.model = saved
+        print(f"Switched to backend '{arg}' (model restored: {saved}).")
+    else:
+        print(f"Switched to backend '{arg}'. Model stays: {state.model}.")
+
+    if state.keep_alive is not None and not getattr(
+        new_backend, "supports_keep_alive", False
+    ):
+        print(
+            f"[WARNING] keep_alive is not supported by the '{arg}' backend; "
+            "it will be ignored.",
+            file=sys.stderr,
+        )
+
+    state.refresh_backend_tools()
+    close = getattr(old_client, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
 def _cmd_feed(path: str, state: ChatState):
     if not path:
         print("Usage: /feed <path>")
@@ -1399,7 +1475,7 @@ def _cmd_feed(path: str, state: ChatState):
             model=state.model,
             messages=state.messages,
             loaded_tools=state.loaded_tools,
-            ollama_tools=state.ollama_tools,
+            backend_tools=state.backend_tools,
             options=state.options,
             keep_alive=state.keep_alive,
             show_thinking=state.show_thinking,
@@ -1414,7 +1490,7 @@ def _cmd_feed(path: str, state: ChatState):
             chatinput_file_handle=state.chatinput_file_handle,
             max_tool_rounds=state.max_tool_rounds,
             max_tool_rounds_continuation=state.max_tool_rounds_continuation,
-            ollama_websearch=state.ollama_websearch,
+            websearch=state.websearch,
             color=state.color,
             ndjson_log_file_handle=state.ndjson_log_file_handle,
             state_manager=state.state_manager,
@@ -1733,7 +1809,7 @@ def apply_session(state: ChatState, data: dict, source: str = "session") -> None
                 state.ctx_usage["rounds_model"] = stored_stats.get("model") or state.model
     else:
         state.stats_by_model = {}
-    # Mode must be restored before tool reload so refresh_ollama_tools()
+    # Mode must be restored before tool reload so refresh_backend_tools()
     # runs with the resumed mode in effect (tools are advertised in full in
     # both modes; write tools are gated at execution time).
     if "mode" in data and data.get("mode") in _MODES:
@@ -1749,7 +1825,7 @@ def apply_session(state: ChatState, data: dict, source: str = "session") -> None
                 state.loaded_tool_modules.append(module_name)
             except Exception as e:
                 print(f"Warning: could not reload toolset '{module_name}': {e}")
-        state.refresh_ollama_tools()
+        state.refresh_backend_tools()
     if "skill" in data or "skill_text" in data:
         state.skill = data.get("skill")
         state.skill_text = data.get("skill_text")
@@ -2483,9 +2559,9 @@ def _tools_load(names: str, state: ChatState):
             print(f"Error loading toolset '{module_name}': {e}")
             state.loaded_tools = tools_before
             state.loaded_tool_modules = modules_before
-            state.refresh_ollama_tools()
+            state.refresh_backend_tools()
             return
-    state.refresh_ollama_tools()
+    state.refresh_backend_tools()
     short_names = " ".join(m.rsplit(".", 1)[-1] for m in loaded_any)
     print(f"Loaded toolset(s): {short_names}")
 
@@ -2514,7 +2590,7 @@ def _tools_unload(names: str, state: ChatState):
         m for m in state.loaded_tool_modules if m not in set(to_remove)
     ]
     state.loaded_tools = [t for t in state.loaded_tools if t not in remove_tools]
-    state.refresh_ollama_tools()
+    state.refresh_backend_tools()
     short_names = " ".join(m.rsplit(".", 1)[-1] for m in to_remove)
     print(f"Unloaded toolset(s): {short_names}")
 

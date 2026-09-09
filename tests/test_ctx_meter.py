@@ -7,7 +7,6 @@ context-window resolution chain (num_ctx -> env -> ps -> show -> None).
 
 import os
 import sys
-from types import SimpleNamespace
 
 current_file = os.path.abspath(__file__)
 lama_ole_dir = os.path.abspath(os.path.join(os.path.dirname(current_file), ".."))
@@ -16,26 +15,20 @@ if lama_ole_dir not in sys.path:
 
 import chat  # noqa: E402
 import color_util  # noqa: E402
-
-
-class _FakePsModel:
-    def __init__(self, name, context_length):
-        self.model = name
-        self.name = name
-        self.context_length = context_length
+from backends.base import ModelInfo, RunningModel  # noqa: E402
 
 
 class _FakeClient:
-    def __init__(self, ps_models=None, show=None):
-        self._ps_models = ps_models or []
+    def __init__(self, running=None, show=None):
+        self._running = list(running or [])
         self._show = show
 
-    def ps(self):
-        return SimpleNamespace(models=list(self._ps_models))
+    def list_running(self):
+        return list(self._running)
 
-    def show(self, model=None):
+    def show_model(self, model=None):
         if self._show is None:
-            raise RuntimeError("unexpected show() call")
+            raise RuntimeError("unexpected show_model() call")
         return self._show
 
 
@@ -218,32 +211,38 @@ def test_estimate_context_tokens_includes_system_prompt():
 
 
 def test_resolve_num_ctx_option_wins():
-    client = _FakeClient(ps_models=[_FakePsModel("test:model", 100000)])
+    client = _FakeClient(running=[RunningModel(name="test:model", context_length=100000)])
     st = _state(client=client, options={"num_ctx": 16384})
     assert chat._resolve_ctx_max(st) == 16384
 
 
 def test_resolve_env_override(monkeypatch):
-    client = _FakeClient(ps_models=[_FakePsModel("test:model", 100000)])
+    client = _FakeClient(running=[RunningModel(name="test:model", context_length=100000)])
     st = _state(client=client)
     monkeypatch.setenv("LAMA_OLE_CTX_SIZE", "8192")
     assert chat._resolve_ctx_max(st) == 8192
 
 
 def test_resolve_ps_running_model():
-    client = _FakeClient(ps_models=[_FakePsModel("test:model", 100000)])
+    client = _FakeClient(running=[RunningModel(name="test:model", context_length=100000)])
     st = _state(client=client)
     assert chat._resolve_ctx_max(st) == 100000
 
 
 def test_resolve_show_num_ctx_parameter():
-    show = SimpleNamespace(parameters="num_ctx            4096\n", modelinfo={})
+    show = ModelInfo(name="test:model", context_length=4096)
     st = _state(client=_FakeClient(show=show))
     assert chat._resolve_ctx_max(st) == 4096
 
 
 def test_resolve_show_modelinfo_context_length():
-    show = SimpleNamespace(parameters="", modelinfo={"qwen35moe.context_length": 262144})
+    show = ModelInfo(
+        name="test:model",
+        context_length=None,
+        backend_specific={
+            "modelinfo": {"qwen35moe.context_length": 262144},
+        },
+    )
     st = _state(client=_FakeClient(show=show))
     assert chat._resolve_ctx_max(st) == 262144
 
@@ -254,10 +253,10 @@ def test_resolve_none_when_unavailable():
 
 
 def test_ensure_ctx_max_caches():
-    client = _FakeClient(ps_models=[_FakePsModel("test:model", 100000)])
+    client = _FakeClient(running=[RunningModel(name="test:model", context_length=100000)])
     st = _state(client=client)
     chat._ensure_ctx_max(st)
     assert st.ctx_max == 100000
-    client._ps_models = []
+    client._running = []
     chat._ensure_ctx_max(st)
     assert st.ctx_max == 100000

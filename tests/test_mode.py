@@ -17,16 +17,25 @@ if lama_ole_dir not in sys.path:
 
 import chat  # noqa: E402
 from tool_base import compose_system_prompt, load_tools  # noqa: E402
+from backends.echo_backend import EchoMockBackend  # noqa: E402
 
 
 def _make_state(**kwargs):
-    kwargs.setdefault("client", None)
+    kwargs.setdefault("client", EchoMockBackend())
     kwargs.setdefault("model", "m")
     return chat.ChatState(**kwargs)
 
 
 def _tool_names(state):
-    return [t.function.name for t in state.ollama_tools]
+    if not state.backend_tools:
+        return []
+    names = []
+    for t in state.backend_tools:
+        if isinstance(t, dict):
+            names.append(t.get("function", {}).get("name") or t.get("name"))
+        else:
+            names.append(getattr(getattr(t, "function", None), "name", getattr(t, "name", None)))
+    return names
 
 
 def _state_with_tools(modules):
@@ -36,7 +45,7 @@ def _state_with_tools(modules):
         tools.extend(load_tools(mod))
     st.loaded_tools = tools
     st.loaded_tool_modules = list(modules)
-    st.refresh_ollama_tools()
+    st.refresh_backend_tools()
     return st
 
 
@@ -109,7 +118,7 @@ def test_plan_keeps_all_tools_advertised():
 def test_plan_mode_keeps_write_only_tools_advertised():
     st = _state_with_tools(["tools.edit"])
     chat._set_mode(st, "plan")
-    assert st.ollama_tools is not None
+    assert st.backend_tools is not None
     assert "edit" in _tool_names(st)
     chat._set_mode(st, "build")
     assert "edit" in _tool_names(st)

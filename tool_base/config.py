@@ -15,14 +15,7 @@ def get_vision_models() -> list[str]:
     return list(_VISION_MODELS)
 
 
-# Ollama host configured via CLI --host (fallback for tools)
-_OLLAMA_HOST = "http://localhost:11434"
-
-
-def set_ollama_host(host: str):
-    global _OLLAMA_HOST
-    _OLLAMA_HOST = host
-
-
+# Fixed Ollama host used as fallback by media understanding tools. The user
+# can override it via LAMA_OLE_VISION_HOST (see tools/media_understanding_tools.py).
 def get_ollama_host() -> str:
-    return _OLLAMA_HOST
+    return "http://localhost:11434"

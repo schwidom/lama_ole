@@ -108,9 +108,16 @@ def _log_chunk(msg, file):
     if msg.content:
         parts.append(f"content={msg.content!r}")
     if msg.tool_calls:
-        calls = ", ".join(
-            f"{tc.function.name}({dict(tc.function.arguments)})"
-            for tc in msg.tool_calls
-        )
-        parts.append(f"tool_calls=[{calls}]")
+        calls = []
+        for tc in msg.tool_calls:
+            if isinstance(tc, dict):
+                fn = tc.get("function") or {}
+                name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)
+                arguments = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", {})
+                if isinstance(arguments, str):
+                    arguments = {}
+                calls.append(f"{name}({dict(arguments)})")
+            else:
+                calls.append(f"{tc.function.name}({dict(tc.function.arguments)})")
+        parts.append(f"tool_calls=[{', '.join(calls)}]")
     print(f"[chunk: {', '.join(parts)}]", file=file, flush=True)

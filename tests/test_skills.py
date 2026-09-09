@@ -22,6 +22,7 @@ lama_ole_cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(lama_ole_cli)
 
 from tool_base.engine import compose_system_prompt, run_with_tools  # noqa: E402
+from backends.base import ChatChunk  # noqa: E402
 
 
 def _write_text(path, text):
@@ -31,9 +32,7 @@ def _write_text(path, text):
 
 
 def _fake_chat_stream(content="reply"):
-    chunk = SimpleNamespace(
-        message=SimpleNamespace(thinking=None, content=content, tool_calls=None)
-    )
+    chunk = ChatChunk(thinking=None, content=content, tool_calls=None)
     return iter([chunk])
 
 
@@ -86,7 +85,7 @@ class TestRunWithToolsSkillInjection:
             model="m",
             messages=messages,
             loaded_tools=[],
-            ollama_tools=None,
+            backend_tools=None,
             options={},
             keep_alive=None,
             show_thinking=False,
@@ -108,7 +107,7 @@ class TestRunWithToolsSkillInjection:
             model="m",
             messages=messages,
             loaded_tools=[],
-            ollama_tools=None,
+            backend_tools=None,
             options={},
             keep_alive=None,
             show_thinking=False,

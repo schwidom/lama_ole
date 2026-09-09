@@ -2,7 +2,7 @@
 
 Covers the registry helpers (idempotent load, available toolsets, module
 lookup) and the chat.py command handlers: loaded / available / show / all /
-load / unload, atomic multi-load, duplicate/unknown rejection, ollama_tools
+load / unload, atomic multi-load, duplicate/unknown rejection, backend_tools
 refresh, and /save-/load persistence.
 """
 
@@ -20,6 +20,7 @@ if lama_ole_dir not in sys.path:
     sys.path.insert(0, lama_ole_dir)
 
 import chat  # noqa: E402
+from backends.echo_backend import EchoMockBackend  # noqa: E402
 from tool_base import (  # noqa: E402
     get_available_toolsets,
     get_tool_modules_info,
@@ -72,7 +73,7 @@ def fake_tools_dir():
 
 
 def make_state(tools_dir):
-    state = chat.ChatState(client=None, model="test")
+    state = chat.ChatState(client=EchoMockBackend(), model="test")
     state.tools_dir = tools_dir
     return state
 
@@ -151,15 +152,15 @@ def test_tools_available_command(fake_tools_dir, capsys):
     assert bad_name in out
 
 
-def test_tools_load_refreshes_ollama(fake_tools_dir, capsys):
+def test_tools_load_refreshes_backend(fake_tools_dir, capsys):
     tmp, _ = fake_tools_dir
     state = make_state(tmp)
     chat._cmd_tools("load good_a good_b", state)
     capsys.readouterr()
     assert state.loaded_tool_modules == ["good_a", "good_b"]
     assert sorted(t.name for t in state.loaded_tools) == ["add", "greet", "mul"]
-    assert state.ollama_tools is not None
-    assert len(state.ollama_tools) == 3
+    assert state.backend_tools is not None
+    assert len(state.backend_tools) == 3
 
 
 def test_tools_load_duplicate_rejected(fake_tools_dir, capsys):
@@ -194,7 +195,7 @@ def test_tools_load_import_error_rolls_back(fake_tools_dir, capsys):
     assert "boom" in out or "Error loading toolset" in out
     assert state.loaded_tool_modules == []
     assert state.loaded_tools == []
-    assert state.ollama_tools is None
+    assert state.backend_tools is None
 
 
 def test_tools_unload(fake_tools_dir, capsys):
@@ -207,7 +208,7 @@ def test_tools_unload(fake_tools_dir, capsys):
     assert "Unloaded toolset(s): good_a" in out
     assert state.loaded_tool_modules == ["good_b"]
     assert sorted(t.name for t in state.loaded_tools) == ["greet"]
-    assert len(state.ollama_tools) == 1
+    assert len(state.backend_tools) == 1
 
 
 def test_tools_unload_not_loaded(fake_tools_dir, capsys):
@@ -222,7 +223,7 @@ def test_tools_unload_not_loaded(fake_tools_dir, capsys):
     assert len(state.loaded_tools) == 2
 
 
-def test_tools_unload_all_sets_ollama_none(fake_tools_dir, capsys):
+def test_tools_unload_all_sets_backend_none(fake_tools_dir, capsys):
     tmp, _ = fake_tools_dir
     state = make_state(tmp)
     chat._cmd_tools("load good_a good_b", state)
@@ -231,7 +232,7 @@ def test_tools_unload_all_sets_ollama_none(fake_tools_dir, capsys):
     capsys.readouterr()
     assert state.loaded_tool_modules == []
     assert state.loaded_tools == []
-    assert state.ollama_tools is None
+    assert state.backend_tools is None
 
 
 def test_tools_loaded_command(fake_tools_dir, capsys):
@@ -289,11 +290,11 @@ def test_save_load_persistence(fake_tools_dir, capsys):
     chat._cmd_load(save_path, fresh)
     assert fresh.loaded_tool_modules == ["good_a"]
     assert sorted(t.name for t in fresh.loaded_tools) == ["add", "mul"]
-    assert len(fresh.ollama_tools) == 2
+    assert len(fresh.backend_tools) == 2
 
 
-def test_refresh_ollama_tools_empty(fake_tools_dir):
+def test_refresh_backend_tools_empty(fake_tools_dir):
     tmp, _ = fake_tools_dir
     state = make_state(tmp)
-    state.refresh_ollama_tools()
-    assert state.ollama_tools is None
+    state.refresh_backend_tools()
+    assert state.backend_tools is None

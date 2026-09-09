@@ -12,6 +12,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Un
 from tool_base import DEFAULT_CTX_COMPACT_THRESHOLD, sanitize_ctx_threshold
 from version import VERSION
 
+from backends.registry import SUPPORTED_BACKENDS
+
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
@@ -55,11 +57,26 @@ PARAMETERS: List[ParameterSpec] = [
         help=VERSION,
     ),
     ParameterSpec(
+        name="backend",
+        flags=["--backend"],
+        env_var="LAMA_OLE_BACKEND",
+        default="ollama",
+        choices=SUPPORTED_BACKENDS,
+        help="LLM backend to use for inference",
+    ),
+    ParameterSpec(
+        name="api_key",
+        flags=["--api-key"],
+        env_var="LAMA_OLE_API_KEY",
+        default=None,
+        help="API key for backends that require authentication",
+    ),
+    ParameterSpec(
         name="host",
         flags=["--host"],
         env_var="LAMA_OLE_HOST",
-        default="http://localhost:11434",
-        help="The host of the ollama instance (e.g. http://localhost:11434)",
+        default=None,
+        help="Host endpoint of the chosen backend (each backend defines its own default)",
     ),
     ParameterSpec(
         name="model",

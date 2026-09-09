@@ -2,9 +2,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Optional, List
-
-from ollama import Tool as OllamaTool
+from typing import Any, Dict, List, Optional
 
 import color_util
 
@@ -13,6 +11,78 @@ from .constants import DANGEROUS_TOOLS
 from .utils import create_uuid_15
 
 _MISSING = object()
+
+# Models for which we already warned that the backend produced no thinking
+# output (module-level fallback for one-shot runs; the REPL keeps a per-state
+# copy so the warning fires at most once per model in a session).
+_WARNED_NO_THINKING_MODELS = set()
+
+
+def _normalize_tool_calls(tool_calls: Any) -> List[Dict]:
+    """Normalize backend tool calls to OpenAI-style dicts.
+
+    The engine's conversation history and the LlmBackend interface use the
+    OpenAI function-calling shape:
+        {"function": {"name": ..., "arguments": {...}}}
+    This helper also tolerates the legacy object style (OllamaTool-like) so
+    defensive paths never crash on either representation.
+    """
+    result: List[Dict] = []
+    for tc in tool_calls:
+        fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", {})
+        if fn is None:
+            fn = {}
+        name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)
+        arguments = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except Exception:
+                arguments = {}
+        elif isinstance(arguments, dict):
+            arguments = dict(arguments)
+        else:
+            arguments = {}
+        result.append({"function": {"name": name, "arguments": arguments}})
+    return result
+
+
+def _websearch_tool() -> Dict:
+    """Build the optional web_search tool in the shared OpenAI dict format."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for current information",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    }
+
+
+def _warn_missing_thinking(model: str, mode_state) -> None:
+    """Warn (once per model per session) that no thinking output was produced."""
+    store = None
+    if mode_state is not None:
+        store = getattr(mode_state, "_warned_no_thinking_models", None)
+    if store is None:
+        store = _WARNED_NO_THINKING_MODELS
+    if model in store:
+        return
+    store.add(model)
+    print(
+        f"[WARNING] Model '{model}' produced no thinking output on this "
+        "backend; the thinking process will be hidden.",
+        file=sys.stderr,
+    )
 
 
 def _stamp_message(msg) -> None:
@@ -139,7 +209,7 @@ def run_with_tools(
     model,
     messages: List[dict],
     loaded_tools: List[Tool],
-    ollama_tools: Optional[List[OllamaTool]],
+    backend_tools: Optional[List[Dict]],
     options: dict,
     keep_alive: Any,
     show_thinking: bool,
@@ -155,7 +225,7 @@ def run_with_tools(
     chatinput_file_handle=None,
     max_tool_rounds: Optional[int] = None,
     max_tool_rounds_continuation: str = "ask",
-    ollama_websearch: bool = False,
+    websearch: bool = False,
     ndjson_log_file_handle=None,
     color: str = "auto",
     state_manager=None,
@@ -191,12 +261,12 @@ def run_with_tools(
         """Adopt mode_state's advertised tool list after a mid-turn toggle."""
         if mode_state is None:
             return tools_for_request
-        new_tools = getattr(mode_state, "ollama_tools", _MISSING)
+        new_tools = getattr(mode_state, "backend_tools", _MISSING)
         if new_tools is not _MISSING and new_tools is not tools_for_request:
             return new_tools
         return tools_for_request
 
-    tools_for_request = ollama_tools
+    tools_for_request = backend_tools
 
     from contextlib import contextmanager
 
@@ -239,28 +309,13 @@ def run_with_tools(
             from .logging import _log_ndjson_message
             _log_ndjson_message(ndjson_log_file_handle, model, system_msg)
 
-    if ollama_websearch:
-        web_tool = OllamaTool(
-            type="function",
-            function=OllamaTool.Function(
-                name="web_search",
-                description="Search the web for current information",
-                parameters=OllamaTool.Function.Parameters(
-                    type="object",
-                    properties={
-                        "query": OllamaTool.Function.Parameters.Property(
-                            type="string",
-                            description="The search query",
-                        ),
-                    },
-                    required=["query"],
-                ),
-            ),
-        )
-        if ollama_tools:
-            ollama_tools.append(web_tool)
+    if websearch:
+        web_tool = _websearch_tool()
+        if backend_tools:
+            backend_tools.append(web_tool)
         else:
-            ollama_tools = [web_tool]
+            backend_tools = [web_tool]
+        tools_for_request = backend_tools
 
     if verbose >= 2:
         from .logging import _log_messages_payload
@@ -363,23 +418,25 @@ def run_with_tools(
             )
             try:
                 for chunk in stream:
-                    msg = chunk.message
-
                     if getattr(chunk, "prompt_eval_count", None) is not None:
                         last_prompt_eval_count = chunk.prompt_eval_count
                     if getattr(chunk, "eval_count", None) is not None:
                         last_eval_count = chunk.eval_count
-                    if getattr(chunk, "eval_duration", None) is not None:
-                        last_eval_duration_ns = chunk.eval_duration
-                    if getattr(chunk, "prompt_eval_duration", None) is not None:
-                        last_prompt_eval_duration_ns = chunk.prompt_eval_duration
+                    if getattr(chunk, "eval_duration_ns", None) is not None:
+                        last_eval_duration_ns = chunk.eval_duration_ns
+                    if getattr(chunk, "prompt_eval_duration_ns", None) is not None:
+                        last_prompt_eval_duration_ns = chunk.prompt_eval_duration_ns
 
                     if verbose >= 3:
                         from .logging import _log_chunk
-                        _log_chunk(msg, file=sys.stderr)
+                        _log_chunk(chunk, file=sys.stderr)
 
-                    if msg.thinking:
-                        think_text += msg.thinking
+                    thinking = getattr(chunk, "thinking", None)
+                    content = getattr(chunk, "content", None) or ""
+                    tool_calls = getattr(chunk, "tool_calls", None)
+
+                    if thinking:
+                        think_text += thinking
                         if not think_state:
                             think_state = True
                             state_manager.transition_to(ExecutionState.THINKING)
@@ -389,12 +446,12 @@ def run_with_tools(
                                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
                                 print(color_util.colored(f"[{ts}] Thinking starts", color_util.C_THINK, use_color))
                         if show_thinking:
-                            print(color_util.colored(msg.thinking, color_util.C_THINK, use_color), end='', flush=True)
+                            print(color_util.colored(thinking, color_util.C_THINK, use_color), end='', flush=True)
                         if thought_logger:
-                            thought_logger.write_thought(msg.thinking)
-                        response_thinking += msg.thinking
+                            thought_logger.write_thought(thinking)
+                        response_thinking += thinking
 
-                    if msg.content:
+                    if content:
                         if think_state:
                             think_state = False
                             state_manager.transition_to(ExecutionState.OUTPUTTING)
@@ -407,13 +464,13 @@ def run_with_tools(
                                 print()
                         elif state_manager.current_state != ExecutionState.OUTPUTTING:
                             state_manager.transition_to(ExecutionState.OUTPUTTING)
-                        response_content += msg.content
-                        print(color_util.colored(msg.content, color_util.C_OUTPUT, use_color), end='', flush=True)
+                        response_content += content
+                        print(color_util.colored(content, color_util.C_OUTPUT, use_color), end='', flush=True)
                         if output_logger:
-                            output_logger.write_output(msg.content)
+                            output_logger.write_output(content)
 
-                    if msg.tool_calls:
-                        response_tool_calls = msg.tool_calls
+                    if tool_calls:
+                        response_tool_calls = tool_calls
             finally:
                 if stream is not None and hasattr(stream, "close"):
                     stream.close()
@@ -455,6 +512,7 @@ def run_with_tools(
             )
 
         if response_tool_calls:
+            normalized_calls = _normalize_tool_calls(response_tool_calls)
             combined_content = ""
             if response_thinking:
                 combined_content += f"<thought>\n{response_thinking}\n</thought>\n\n"
@@ -463,15 +521,7 @@ def run_with_tools(
             assistant_msg = {
                 "role": "assistant",
                 "content": combined_content or None,
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": dict(tc.function.arguments),
-                        }
-                    }
-                    for tc in response_tool_calls
-                ],
+                "tool_calls": normalized_calls,
             }
             if show_thinking and think_text.strip():
                 assistant_msg["thinking"] = think_text
@@ -491,24 +541,19 @@ def run_with_tools(
                     output_msg = {
                         "role": "assistant",
                         "content": response_content or None,
-                        "tool_calls": [
-                            {
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": dict(tc.function.arguments),
-                                }
-                            }
-                            for tc in response_tool_calls
-                        ],
+                        "tool_calls": normalized_calls,
                         "mode": "output",
                     }
                     _log_ndjson_message(ndjson_log_file_handle, model, output_msg)
                 else:
                     _log_ndjson_message(ndjson_log_file_handle, model, assistant_msg)
 
-            for tc in response_tool_calls:
-                tool_name = tc.function.name
-                arguments = dict(tc.function.arguments) if tc.function.arguments else {}
+            for tc in normalized_calls:
+                fn = tc.get("function") or {}
+                tool_name = fn.get("name")
+                arguments = fn.get("arguments") or {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
                 args_str = ", ".join(
                     f"{k}={v!r}" for k, v in arguments.items()
                 )
@@ -664,6 +709,9 @@ def run_with_tools(
 
             tool_rounds += 1
         else:
+            if show_thinking and not response_thinking:
+                _warn_missing_thinking(model, mode_state)
+
             assistant_msg = {"role": "assistant", "content": response_content}
             if show_thinking and think_text.strip():
                 assistant_msg["thinking"] = think_text
@@ -704,47 +752,3 @@ def run_with_tools(
             metrics["turn_elapsed_s"] = time.monotonic() - turn_elapsed_started
 
     return final_response
-
-
-def to_ollama_tools(tools: List[Tool]) -> List[OllamaTool]:
-    """Converts a list of internal Tool objects into OllamaTool objects.
-
-    Iterates through the provided tools and transforms their parameters, 
-    including type, description, and enum values, into the format 
-    required by the Ollama API's tool-calling specification.
-
-    Args:
-        tools (List[Tool]): A list of Tool objects containing function definitions.
-
-    Returns:
-        List[OllamaTool]: A list of formatted OllamaTool objects.
-    """
-
-    result = []
-    for t in tools:
-        params = t.parameters
-        properties: dict[str, Any] = {}
-        required = params.get("required", [])
-
-        for pname, pinfo in params.get("properties", {}).items():
-            prop = OllamaTool.Function.Parameters.Property(
-                type=pinfo.get("type", "string"),
-                description=pinfo.get("description", ""),
-            )
-            if "enum" in pinfo:
-                prop.enum = pinfo["enum"]
-            properties[pname] = prop
-        ot = OllamaTool(
-            type="function",
-            function=OllamaTool.Function(
-                name=t.name,
-                description=t.description,
-                parameters=OllamaTool.Function.Parameters(
-                    type="object",
-                    properties=properties,
-                    required=required if required else None,
-                ),
-            ),
-        )
-        result.append(ot)
-    return result

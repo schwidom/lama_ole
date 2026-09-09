@@ -10,7 +10,6 @@ Covers:
 import importlib.util
 import os
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +19,7 @@ if lama_ole_dir not in sys.path:
     sys.path.insert(0, lama_ole_dir)
 
 import chat  # noqa: E402
+from backends.base import ChatChunk  # noqa: E402
 from tool_base import StateManager, run_with_tools  # noqa: E402
 from tool_base.loop_states import (  # noqa: E402
     ExecutionInterrupted,
@@ -35,11 +35,7 @@ _spec.loader.exec_module(lama_ole_cli)
 
 
 def _chunk(content=None, thinking=None, tool_calls=None):
-    return SimpleNamespace(
-        message=SimpleNamespace(
-            thinking=thinking, content=content, tool_calls=tool_calls
-        )
-    )
+    return ChatChunk(thinking=thinking, content=content, tool_calls=tool_calls)
 
 
 def _normal_stream(content="reply"):
@@ -67,7 +63,7 @@ def _run_kwargs(client, messages, **extra):
         model="test",
         messages=messages,
         loaded_tools=[],
-        ollama_tools=None,
+        backend_tools=None,
         options={},
         keep_alive=None,
         show_thinking=False,
@@ -173,6 +169,9 @@ def test_main_initial_content_interrupt_falls_back_to_repl(monkeypatch, capsys):
         def chat(self, **kwargs):
             raise KeyboardInterrupt()
 
+        def convert_tools(self, tools):
+            return None
+
     calls = {"run_chat": 0}
     seen = {"state": None}
 
@@ -180,7 +179,7 @@ def test_main_initial_content_interrupt_falls_back_to_repl(monkeypatch, capsys):
         calls["run_chat"] += 1
         seen["state"] = state
 
-    monkeypatch.setattr(lama_ole_cli, "Client", FakeClient)
+    monkeypatch.setattr(lama_ole_cli, "create_backend", lambda *a, **k: FakeClient())
     monkeypatch.setattr(lama_ole_cli, "run_chat", fake_run_chat)
     monkeypatch.setattr(lama_ole_cli, "load_env_files", lambda: None)
     for key in (
@@ -233,14 +232,10 @@ def test_main_initial_content_interrupt_falls_back_to_repl(monkeypatch, capsys):
 
 
 def _toolcall_chunk(name, args):
-    return SimpleNamespace(
-        message=SimpleNamespace(
-            thinking=None,
-            content=None,
-            tool_calls=[
-                SimpleNamespace(function=SimpleNamespace(name=name, arguments=args))
-            ],
-        )
+    return ChatChunk(
+        thinking=None,
+        content=None,
+        tool_calls=[{"function": {"name": name, "arguments": args}}],
     )
 
 
@@ -299,14 +294,10 @@ def test_run_chat_interrupt_during_tool_execution_drops_dangling_toolcall(
         raise KeyboardInterrupt()
 
     def chunk():
-        return SimpleNamespace(
-            message=SimpleNamespace(
-                thinking=None,
-                content=None,
-                tool_calls=[
-                    SimpleNamespace(function=SimpleNamespace(name="boom", arguments={}))
-                ],
-            )
+        return ChatChunk(
+            thinking=None,
+            content=None,
+            tool_calls=[{"function": {"name": "boom", "arguments": {}}}],
         )
 
     class FakeClient:
@@ -352,15 +343,13 @@ def test_run_chat_interrupt_during_multicall_round_drops_partial_results(
         raise KeyboardInterrupt()
 
     def chunk():
-        return SimpleNamespace(
-            message=SimpleNamespace(
-                thinking=None,
-                content=None,
-                tool_calls=[
-                    SimpleNamespace(function=SimpleNamespace(name="ok", arguments={})),
-                    SimpleNamespace(function=SimpleNamespace(name="boom", arguments={})),
-                ],
-            )
+        return ChatChunk(
+            thinking=None,
+            content=None,
+            tool_calls=[
+                {"function": {"name": "ok", "arguments": {}}},
+                {"function": {"name": "boom", "arguments": {}}},
+            ],
         )
 
     class FakeClient:

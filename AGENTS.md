@@ -1,6 +1,6 @@
 ## Project Overview — `lama_ole`
 
-**What it is:** A CLI wrapper around [Ollama](https://ollama.com) for interacting with local LLMs, supporting streaming chat, tool calling, thinking-process display, and media understanding (image/video/audio).
+**What it is:** A CLI wrapper around pluggable LLM backends (default: [Ollama](https://ollama.com)) for interacting with local/remote LLMs, supporting streaming chat, tool calling, thinking-process display, and media understanding (image/video/audio). Backends: `ollama`, `llamacpp`, `openai_compat`, plus `eliza`/`echo` mocks.
 
 ---
 
@@ -10,17 +10,30 @@
 lama_ole/
 ├── __init__.py              # empty package marker
 ├── lama_ole.py              # CLI entry point — argparse setup, orchestration, model transfer
+├── parameters.py            # Central parameter catalog (--backend, --api-key, ...) reflected into CLI args
+├── backends/                # Pluggable LLM backend package (lazy-loaded, decoupled from ollama)
+│   ├── __init__.py          # Public re-exports (LlmBackend, create_backend, SUPPORTED_BACKENDS, ...)
+│   ├── base.py              # LlmBackend ABC + ChatChunk / ModelInfo / RunningModel dataclasses
+│   ├── registry.py          # BACKEND_REGISTRY + SUPPORTED_BACKENDS + DEFAULT_BACKEND
+│   ├── factory.py           # create_backend() lazy instantiation; ValueError on unknown backend
+│   ├── _compat.py           # normalize_host(): backend-specific default scheme/port
+│   ├── _tools.py            # shared convert_tools_to_openai() helper
+│   ├── ollama_backend.py    # OllamaBackend (native ollama library; keep_alive, list/ps/stop/transfer)
+│   ├── llamacpp_backend.py  # LlamaCppBackend (subclass of OpenAICompatBackend, port 8080, no api key)
+│   ├── openai_compat_backend.py  # SSE streaming, reasoning_content->thinking, tool_call accumulation
+│   ├── echo_backend.py      # EchoMockBackend (offline mock)
+│   └── eliza_backend.py     # ElizaBackend (scripted mock)
 ├── tool_base/               # Core engine package: @tool decorator, Tool registry, run_with_tools loop, safety prompt
 │   ├── __init__.py          # Public re-exports (run_with_tools, tool, StateManager, StateLogger, ...)
 │   ├── constants.py         # SAFETY_SYSTEM_PROMPT, JSON_RETURN_PROMPT, DANGEROUS_TOOLS
 │   ├── config.py            # Vision models + Ollama host configuration
-│   ├── engine.py            # run_with_tools loop + to_ollama_tools conversion
+│   ├── engine.py            # run_with_tools loop (consumes ChatChunk structs; no ollama imports)
 │   ├── logging.py           # StateLogger + granular timestamp helpers
 │   ├── loop_states.py       # ExecutionState enum + StateManager
 │   ├── models.py            # Tool, ToolModuleInfo dataclasses
 │   ├── registry.py          # @tool decorator, tool loading
 │   └── utils.py             # _infer_params, create_uuid_15
-├── chat.py                  # ChatState + REPL with slash commands (/feed, /new, /model, /skill, /stats, etc.)
+├── chat.py                  # ChatState + REPL with slash commands (/feed, /new, /model, /backend, /skill, /stats, etc.)
 ├── lsp/                     # Language Server integration engine (JSON-RPC over stdio)
 │   ├── __init__.py          # Public re-exports (JsonRpcCodec, LspClient, LspSessionManager, resolve_server, ...)
 │   ├── jsonrpc.py           # JsonRpcCodec: Content-Length framing, incremental parser
@@ -35,6 +48,7 @@ lama_ole/
 │   ├── fakes/fake_lsp_server.py  # deterministic scripted LSP server for the LSP tests
 │   ├── lsp_fixtures.py           # fake-server script helpers (standard_script, diag_script, ...)
 │   ├── test_lsp_*.py             # jsonrpc / client / session / tools / integration tests
+│   ├── tests_<backendname>/      # opt-in backend-specific dirs (see "Backend-Specific Test Directories")
 │   └── run_all_tests.py     # Runs both frameworks (see "Running the Tests")
 └── tools/                   # Loadable tool modules (each is a Python module)
     ├── __init__.py
@@ -55,9 +69,11 @@ lama_ole/
 
 | File | Role |
 |------|------|
-| **`lama_ole.py`** | CLI entry point. Parses args, creates Ollama `Client`, handles model listing/transfer/blob-server as standalone modes, then delegates to either `run_with_tools()` (one-shot) or `ChatState` + `run_chat()` (REPL). Contains the full model transfer logic (`FilesystemBlobSource`, `HttpBlobSource`). |
-| **`tool_base/`** | Core engine package. Defines `@tool` decorator that auto-infers JSON Schema from type annotations, registers tools in a registry (`registry.py`). `run_with_tools()` (`engine.py`) is the main loop: prepends safety system prompt, streams chat responses, handles tool calls (invoke → wrap result with `[data from ...]` markers → feed back to model), supports safe-mode confirmation for dangerous tools. `loop_states.py` provides `ExecutionState`/`StateManager` for state tracking and robust Ctrl-C handling. `logging.py` provides the centralized `StateLogger` used for granular timestamps. |
-| **`chat.py`** | Interactive REPL (`ChatState`). Manages multi-turn conversation history, slash commands (`/feed`, `/new`, `/model`, `/save`, `/load`, `/tools` (load/unload/show toolsets), `/skill`, `/stats`, `/systemprompt`, `/context`, `/help`, `/exit`), and delegates each turn to `run_with_tools()`. |
+| **`lama_ole.py`** | CLI entry point. Parses args, creates the backend via `create_backend()`, handles model listing/transfer/blob-server as standalone modes, then delegates to either `run_with_tools()` (one-shot) or `ChatState` + `run_chat()` (REPL). Contains the full model transfer logic (`FilesystemBlobSource`, `HttpBlobSource`). |
+| **`parameters.py`** | Central parameter catalog (`ParameterSpec` list). Defines `--backend`, `--api-key`, `--host`, ... reflected into CLI args, env vars, and help/configuration output. |
+| **`backends/`** | Pluggable LLM backend package. `base.py` defines the `LlmBackend` ABC plus `ChatChunk`/`ModelInfo`/`RunningModel` dataclasses; `registry.py` maps backend names to classes; `factory.py`'s `create_backend()` instantiates lazily. `ollama_backend.py` wraps the native `ollama` library; `openai_compat_backend.py` speaks SSE to any OpenAI-compatible API (reasoning_content→thinking, tool-call accumulation); `llamacpp_backend.py` subclasses it (port 8080, no API key); `echo_backend.py`/`eliza_backend.py` are offline mocks. |
+| **`tool_base/`** | Core engine package. Defines `@tool` decorator that auto-infers JSON Schema from type annotations, registers tools in a registry (`registry.py`). `run_with_tools()` (`engine.py`) is the backend-agnostic main loop: consumes `ChatChunk` structs, prepends safety system prompt, streams chat responses, handles tool calls (invoke → wrap result with `[data from ...]` markers → feed back to model), supports safe-mode confirmation for dangerous tools. `loop_states.py` provides `ExecutionState`/`StateManager` for state tracking and robust Ctrl-C handling. `logging.py` provides the centralized `StateLogger` used for granular timestamps. |
+| **`chat.py`** | Interactive REPL (`ChatState`). Manages multi-turn conversation history, slash commands (`/feed`, `/new`, `/model`, `/backend`, `/save`, `/load`, `/tools` (load/unload/show toolsets), `/skill`, `/stats`, `/systemprompt`, `/context`, `/help`, `/exit`), and delegates each turn to `run_with_tools()`. |
 | **`lsp/`** | LSP integration engine. `jsonrpc.py` (`JsonRpcCodec`) does `Content-Length` framing with an incremental parser; `client.py` (`LspClient`) owns one server subprocess per session with an always-on `read1` reader thread, JSON-RPC requests/notifications, and crash detection; `registry.py` maps language ids to server commands (built-in table + `LAMA_OLE_LSP_SERVERS` env override — the LLM never supplies commands); `session.py` (`LspSessionManager`) keeps one client per language, re-syncs changed files (mtime/size) with didOpen/didChange, caches push diagnostics, auto-restarts a crashed server once per explicit start, and registers an `atexit` `stop_all`. |
 | **`tools/*.py`** | Tool modules. Each exports functions decorated with `@tool`. Tools can declare env vars via module-level `__tool_env__` dict (shown by `--help-tools`). |
 
@@ -65,10 +81,11 @@ lama_ole/
 
 ### Key Patterns
 
-- **Tool calling:** Python functions → JSON Schema inference → Ollama tool format conversion (`to_ollama_tools()`) → stream-based execution loop.
-- **Thinking process:** Ollama's `msg.thinking` field is printed/flushed in real-time when `-t` or `--thoughtlog` is set.
+- **Backend abstraction:** `lama_ole.py`/`chat.py` talk only to the `LlmBackend` interface (`chat()`, `convert_tools()`, `list_models()`, `list_running()`, `show_model()`, `stop_model()`). Backends are created via `create_backend(name, host, api_key)` and imported lazily; the core never imports the `ollama` package.
+- **Tool calling:** Python functions → JSON Schema inference → OpenAI tool format (`backends/_tools.py::convert_tools_to_openai()`) → per-backend conversion → stream-based execution loop.
+- **Thinking process:** Backends surface thinking on `ChatChunk.thinking` (ollama `msg.thinking`, OpenAI `reasoning_content`, mocks `*thinking*`); printed/flushed in real-time when `-t` or `--thoughtlog` is set, with a one-time warning per model when a turn produces none.
 - **Safety system prompt:** Built by `compose_system_prompt()` in `tool_base/engine.py`; injected automatically unless `--no_safety_system_prompt` is given.
-- **Model transfer:** Reads Ollama's local manifest/blobs, uploads via HTTP API to destination, rewrites Modelfile paths. Supports local→remote and remote→local (via blob server).
+- **Model transfer:** Ollama-only. Reads Ollama's local manifest/blobs, uploads via HTTP API to destination, rewrites Modelfile paths. Supports local→remote and remote→local (via blob server).
 
 ---
 
@@ -155,6 +172,26 @@ Rules for new masked tests:
   that should normally run.
 - Never mask a test because a single machine fails; either gate the test as
   above or fix the machine.
+
+---
+
+### Backend-Specific Test Directories (`tests/tests_<backendname>/`)
+
+Backend-specific tests that require a real backend server or external
+preconditions live in dedicated directories named `tests/tests_<backendname>/`
+(e.g. `tests/tests_ollama/`, `tests/tests_openai_compat/`). They are opt-in
+exactly like the masked tests above:
+
+- `tests/run_all_tests.py` discovers every `tests/tests_*` subdirectory and
+  derives the gate env var `LAMA_OLE_TEST_<BACKENDNAME>` (directory suffix,
+  uppercased, e.g. `tests_openai_compat/` → `LAMA_OLE_TEST_OPENAI_COMPAT`).
+- The directory is only run when that env var is set to `1`. Otherwise pytest
+  receives `--ignore=...` for it, and the test modules themselves guard with
+  `@unittest.skipUnless(...)` so `unittest discover` also skips them.
+- Each backend test directory must be importable side-effect-free (no network,
+  no spawns, no imports of optional backend libraries at module level). The
+  sys.path bootstrap block (Rule 2 of `testing/001_guidelines.md`) still
+  applies.
 
 ---
 
