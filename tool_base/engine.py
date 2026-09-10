@@ -1,8 +1,9 @@
 import json
 import os
+import re
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import color_util
 
@@ -93,6 +94,230 @@ def _stamp_message(msg) -> None:
     """
     if isinstance(msg, dict) and "timestamp" not in msg:
         msg["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---------------------------------------------------------------------------
+# Text-based tool calls (Qwen3-style `call:name{...}`)
+#
+# Some models emit function calls as plain text instead of populating the
+# structured `tool_calls` channel, e.g.:
+#     </thought><|tool_call|>call:create_new_file{content:<|"|>...<|"|>}<tool_call|><|tool_response>
+# When the backend classifies those tokens as part of the thinking stream they
+# used to be printed verbatim inside the thought block and the turn died with
+# an empty reply. The helpers below strip the delimiter tokens and turn the
+# embedded `call:` directives into normal structured tool calls.
+# ---------------------------------------------------------------------------
+
+_TEXT_DELIM_RE = re.compile(
+    r"</?thought>"
+    r"|<\|im_start\|>(?:think|reasoning|response|assistant|user|system|tool)"
+    r"|<\|im_end\|>"
+    r"|<\|tool_call\|>"
+    r"|<tool_call\|>"
+    r"|<\|tool_response>"
+)
+
+_TEXT_CALL_RE = re.compile(r"(?<![A-Za-z0-9_])call:([A-Za-z_][A-Za-z0-9_.:-]*)(\{)")
+
+
+def _clean_stream_text(text: str) -> str:
+    """Remove model tool-call / chat-template delimiter tokens.
+
+    Runs on every thinking/output chunk before display and accumulation so the
+    markers never leak into the thought block or the stored history. Qwen3's
+    `<|"|">` string-quote token is converted to a normal quote.
+    """
+    if not text:
+        return ""
+    return _TEXT_DELIM_RE.sub("", text).replace('<|"|>', '"')
+
+
+def _brace_balanced(text: str, start: int) -> Optional[int]:
+    """Return the index matching the ``{`` at ``start``, or None if unclosed.
+
+    JSON string literals are skipped so braces inside argument values do not
+    throw off the nesting count.
+    """
+    depth = 0
+    in_str = False
+    escaped = False
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+_BARE_KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\s*:)")
+
+_JSON_CONTROL_ESCAPES = {"\n": r"\n", "\r": r"\r", "\t": r"\t", "\b": r"\b", "\f": r"\f"}
+
+
+def _lenient_json_fix(text: str) -> str:
+    """Repair a leniently-formatted JSON object emitted as a text tool call.
+
+    Two model-isms are tolerated: bare (unquoted) object keys
+    (`{content:"x",path:"y"}`) and literal control characters (e.g. newlines)
+    inside string values. The scanner only rewrites identifiers in key
+    position (right after ``{`` / ``,``) and escapes control chars inside
+    string literals only, so values are never corrupted.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(text)
+    in_str = False
+    escaped = False
+    expect_key = False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if escaped:
+                escaped = False
+                out.append(ch)
+            elif ch == "\\":
+                escaped = True
+                out.append(ch)
+            elif ch == '"':
+                in_str = False
+                out.append(ch)
+            elif ord(ch) < 0x20:
+                out.append(_JSON_CONTROL_ESCAPES.get(ch, "\\u%04x" % ord(ch)))
+            else:
+                out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            expect_key = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "{":
+            expect_key = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "}":
+            expect_key = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            expect_key = True
+            out.append(ch)
+            i += 1
+            continue
+        if expect_key:
+            m = _BARE_KEY_RE.match(text, i)
+            if m:
+                out.append('"')
+                out.append(m.group(1))
+                out.append('"')
+                out.append(m.group(2))
+                expect_key = False
+                i = m.end()
+                continue
+        out.append(ch)
+        if not ch.isspace():
+            expect_key = False
+        i += 1
+    return "".join(out)
+
+
+def _parse_tool_arguments(raw: str) -> Optional[Dict]:
+    """Parse a Qwen3 text-tool-call argument object.
+
+    Tolerates ``<|"|">`` quoting, bare object keys and literal control
+    characters inside string values. None when not parseable.
+    """
+    raw = raw.replace('<|"|>', '"')
+    try:
+        obj = json.loads(_lenient_json_fix(raw))
+    except (ValueError, TypeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _text_call_tail_start(text: str) -> Optional[int]:
+    """Index where a trailing in-progress (or just-closed) `call:` directive
+    starts, so the live display can hold it back; None when nothing matches."""
+    matches = list(_TEXT_CALL_RE.finditer(text))
+    if not matches:
+        return None
+    m = matches[-1]
+    close = _brace_balanced(text, m.start(2))
+    if close is None:
+        return m.start()
+    if not text[close + 1:].strip():
+        return m.start()
+    return None
+
+
+def _extract_text_tool_calls(text: str) -> Tuple[str, List[Dict]]:
+    """Parse every `call:name{...}` directive embedded in ``text``.
+
+    Returns ``(remaining, calls)``: ``remaining`` is ``text`` with every
+    successfully parsed directive removed (keeps surrounding reasoning clean
+    for storage / re-injection) and ``calls`` is a list of OpenAI-style
+    tool-call dicts.
+    """
+    if not text:
+        return text, []
+    pieces: List[str] = []
+    calls: List[Dict] = []
+    pos = 0
+    for m in _TEXT_CALL_RE.finditer(text):
+        close = _brace_balanced(text, m.start(2))
+        if close is None:
+            continue
+        args = _parse_tool_arguments(text[m.start(2):close + 1])
+        if args is None:
+            continue
+        pieces.append(text[pos:m.start()])
+        pos = close + 1
+        calls.append({"function": {"name": m.group(1), "arguments": args}})
+    pieces.append(text[pos:])
+    return "".join(pieces), calls
+
+
+def _stream_to_display(pending: str, new_text: str, emit) -> str:
+    """Append ``new_text`` to the deferred display buffer and immediately emit
+    every prefix that cannot still be the start of a text tool call."""
+    text = pending + new_text
+    tail = _text_call_tail_start(text)
+    if tail is None:
+        if text:
+            emit(text)
+        return ""
+    safe = text[:tail]
+    if safe:
+        emit(safe)
+    return text[tail:]
+
+
+def _flush_pending_display(pending: str, emit) -> str:
+    """Emit the remaining non-directive text of a deferred display buffer."""
+    if not pending:
+        return ""
+    remainder, _ = _extract_text_tool_calls(pending)
+    if remainder:
+        emit(remainder)
+    return ""
 
 
 def _entropy_check_tool_result(result, tool_name) -> None:
@@ -293,6 +518,17 @@ def run_with_tools(
         StateLogger(handle=toolcall_file_handle) if toolcall_file_handle else None
     )
 
+    def _emit_thinking(text: str) -> None:
+        if show_thinking:
+            print(color_util.colored(text, color_util.C_THINK, use_color), end='', flush=True)
+        if thought_logger:
+            thought_logger.write_thought(text)
+
+    def _emit_content(text: str) -> None:
+        print(color_util.colored(text, color_util.C_OUTPUT, use_color), end='', flush=True)
+        if output_logger:
+            output_logger.write_output(text)
+
     has_system = any(m.get("role") == "system" for m in messages)
     if not has_system:
         sp = compose_system_prompt(
@@ -397,6 +633,8 @@ def run_with_tools(
         response_thinking = ""
         response_tool_calls = None
         think_text = ""
+        pending_think_display = ""
+        pending_content_display = ""
         round_prompt_eval_count = None
         round_eval_count = None
         round_eval_duration_ns = None
@@ -436,38 +674,44 @@ def run_with_tools(
                     tool_calls = getattr(chunk, "tool_calls", None)
 
                     if thinking:
-                        think_text += thinking
-                        if not think_state:
-                            think_state = True
-                            state_manager.transition_to(ExecutionState.THINKING)
-                            if thought_logger:
-                                thought_logger.new_slice()
-                            if show_thinking:
-                                ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                                print(color_util.colored(f"[{ts}] Thinking starts", color_util.C_THINK, use_color))
-                        if show_thinking:
-                            print(color_util.colored(thinking, color_util.C_THINK, use_color), end='', flush=True)
-                        if thought_logger:
-                            thought_logger.write_thought(thinking)
-                        response_thinking += thinking
+                        thinking = _clean_stream_text(thinking)
+                        if thinking:
+                            think_text += thinking
+                            if not think_state:
+                                think_state = True
+                                state_manager.transition_to(ExecutionState.THINKING)
+                                if thought_logger:
+                                    thought_logger.new_slice()
+                                if show_thinking:
+                                    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                                    print(color_util.colored(f"[{ts}] Thinking starts", color_util.C_THINK, use_color))
+                            response_thinking += thinking
+                            pending_think_display = _stream_to_display(
+                                pending_think_display, thinking, _emit_thinking
+                            )
 
                     if content:
-                        if think_state:
-                            think_state = False
-                            state_manager.transition_to(ExecutionState.OUTPUTTING)
-                            if output_logger:
-                                output_logger.new_slice()
-                            if show_thinking:
-                                ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                                print()
-                                print(color_util.colored(f"[{ts}] Thinking ends", color_util.C_THINK, use_color))
-                                print()
-                        elif state_manager.current_state != ExecutionState.OUTPUTTING:
-                            state_manager.transition_to(ExecutionState.OUTPUTTING)
-                        response_content += content
-                        print(color_util.colored(content, color_util.C_OUTPUT, use_color), end='', flush=True)
-                        if output_logger:
-                            output_logger.write_output(content)
+                        content = _clean_stream_text(content)
+                        if content:
+                            if think_state:
+                                think_state = False
+                                state_manager.transition_to(ExecutionState.OUTPUTTING)
+                                if output_logger:
+                                    output_logger.new_slice()
+                                pending_think_display = _flush_pending_display(
+                                    pending_think_display, _emit_thinking
+                                )
+                                if show_thinking:
+                                    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                                    print()
+                                    print(color_util.colored(f"[{ts}] Thinking ends", color_util.C_THINK, use_color))
+                                    print()
+                            elif state_manager.current_state != ExecutionState.OUTPUTTING:
+                                state_manager.transition_to(ExecutionState.OUTPUTTING)
+                            response_content += content
+                            pending_content_display = _stream_to_display(
+                                pending_content_display, content, _emit_content
+                            )
 
                     if tool_calls:
                         response_tool_calls = tool_calls
@@ -480,6 +724,21 @@ def run_with_tools(
             think_state = False
             print("\nInterrupted during model response. Returning to prompt.", file=sys.stderr)
             raise ExecutionInterrupted(interrupted_state)
+
+        pending_think_display = _flush_pending_display(pending_think_display, _emit_thinking)
+        pending_content_display = _flush_pending_display(pending_content_display, _emit_content)
+
+        # Promote text-based tool calls (`call:name{...}`) to real structured
+        # tool calls and scrub the directive out of the text that is stored
+        # and re-injected as context, so it is never replayed as "thinking".
+        think_cleaned, calls_from_thinking = _extract_text_tool_calls(response_thinking)
+        content_cleaned, calls_from_content = _extract_text_tool_calls(response_content)
+        if calls_from_thinking or calls_from_content:
+            response_thinking = think_cleaned
+            response_content = content_cleaned
+            think_text = think_cleaned
+            if response_tool_calls is None:
+                response_tool_calls = calls_from_thinking + calls_from_content
 
         if think_state:
             think_state = False
