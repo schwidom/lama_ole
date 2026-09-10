@@ -45,11 +45,14 @@ failure:
 4. **Silent dead turn** — with no `content` and no `tool_calls`, the round fell
    into the final-answer branch and appended an empty assistant message.
 
-5. **Pollution re-injection** — `engine.py:777` builds the stored assistant
-   content as `<thought>\n{response_thinking}\n</thought>`; because
-   `response_thinking` still contained the raw directive, the corrupted
-   thinking was fed back to the model on the next tool round as if it were real
-   reasoning. Each round could add more of the same, compounding the context.
+5. **Pollution re-injection** — the tool-call branch wrapped
+   `response_thinking` into the stored assistant content as
+   `<thought>\n{response_thinking}\n</thought>` (the `engine.py:777` of the
+   pre-task_004 code); because `response_thinking` still contained the raw
+   directive, the corrupted thinking was fed back to the model on the next tool
+   round as if it were real reasoning. Each round could add more of the same,
+   compounding the context. *(Note: this `<thought>` re-injection was itself
+   removed later — see `003_reinjection_sideeffect.md`.)*
 
 ---
 

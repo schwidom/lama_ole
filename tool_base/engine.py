@@ -110,6 +110,8 @@ def _stamp_message(msg) -> None:
 
 _TEXT_DELIM_RE = re.compile(
     r"</?thought>"
+    r"|<\|begin_of_thought\|>"
+    r"|<\|end_of_thought\|>"
     r"|<\|im_start\|>(?:think|reasoning|response|assistant|user|system|tool)"
     r"|<\|im_end\|>"
     r"|<\|tool_call\|>"
@@ -772,14 +774,9 @@ def run_with_tools(
 
         if response_tool_calls:
             normalized_calls = _normalize_tool_calls(response_tool_calls)
-            combined_content = ""
-            if response_thinking:
-                combined_content += f"<thought>\n{response_thinking}\n</thought>\n\n"
-            combined_content += response_content
-
             assistant_msg = {
                 "role": "assistant",
-                "content": combined_content or None,
+                "content": response_content or None,
                 "tool_calls": normalized_calls,
             }
             if show_thinking and think_text.strip():

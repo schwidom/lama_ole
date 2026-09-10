@@ -120,3 +120,29 @@ display and storage.
    `<|begin_of_thought|>` / `<|end_of_thought|>` (and `<|`…`|>` general
    variants) so model-emitted native thinking tags are also scrubbed from
    display/storage.
+
+## Implementation (Decided: option 2 + regex hygiene)
+
+Applied in this session:
+
+- **Dropped the `<thought>` injection**: the tool-call branch now stores
+  `assistant_msg = {"role": "assistant", "content": response_content or None,
+  "tool_calls": ...}` (`engine.py:775-781`). Prior thinking is kept only in the
+  `thinking` field (when `show_thinking`) and in the ndjson log; it is no longer
+  re-sent to the model in `content` (`engine.py:653` already strips the
+  `thinking` field before sending).
+- **Regex hygiene**: `_TEXT_DELIM_RE` now also strips Qwen3's native
+  `<|begin_of_thought|>` and `<|end_of_thought|>` tokens from streamed
+  thinking/content (`engine.py:111-120`), so a model emitting them natively can
+  no longer leak them into display or storage.
+
+**Not done (deferred):** the proper backend-aware thinking-replay channel
+(LlmBackend.chat() thinking parameter mapped to Ollama `msg.thinking` /
+OpenAI-compat `reasoning_content`). It only becomes relevant for
+thinking-capable model families and multi-step tool use; re-visit if/when those
+flows degrade without prior reasoning.
+
+**Tests:** two regressions added to `tests/test_text_tool_calls.py`
+(35 total): Qwen3 native-token stripping unit test, and an integration test
+asserting a tool round's thinking stays out of `content` (stored message and the
+second-round messages re-sent to the backend contain no `<thought>`).

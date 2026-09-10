@@ -26,44 +26,46 @@ Two complementary mechanisms were added:
 
 | Helper / constant | Lines | Purpose |
 |---|---|---|
-| `_TEXT_DELIM_RE` | 111-118 | Matches all chat-template/tool markers (`</?thought>`, `<|im_start|>`, `<|im_end|>`, `<|tool_call|>`, `<tool_call|>`, `<|tool_response>`). |
-| `_TEXT_CALL_RE` | 120 | Matches a text directive: `call:name{` (name may contain `.`: `.-`). Negative lookbehind avoids matching parts of identifiers. |
-| `_clean_stream_text()` | 123-132 | Strips marker tokens and converts `<|"|>` into `"`. Applies to each thinking/content chunk before display and accumulation. |
-| `_brace_balanced()` | 135-163 | Finds the matching `}` for a `{`, skipping JSON string literals, so braces/commas inside argument values don't break nesting. Returns `None` when unclosed. |
-| `_BARE_KEY_RE` / `_lenient_json_fix()` | 166, 171-239 | Repairs lenient JSON: quotes bare object keys (`{content:"x"}`) and escapes literal control characters (e.g. `\n`) inside string values only. Never rewrites anything outside key position / string literals. |
-| `_parse_tool_arguments()` | 242-253 | Normalizes `<|"|">` quoting, applies `_lenient_json_fix`, strict-parses; `None` when not parseable or not an object. |
-| `_text_call_tail_start()` | 256-268 | Index where a trailing in-progress *or just-closed* `call:` directive starts; used by display deferral to decide what must be held back. |
-| `_extract_text_tool_calls()` | 271-295 | Parses every directive in text, returns `(remaining, calls)` — remaining text with the directives removed plus OpenAI-style call dicts. |
-| `_stream_to_display()` | 298-310 | Deferred-display accumulation: emits every prefix that cannot still be the start of a directive, holds back the directive tail. |
-| `_flush_pending_display()` | 313-320 | Drains the deferred buffer, scrubbing any fully-formed directive that ended exactly at the stream boundary. |
+| `_TEXT_DELIM_RE` | 111-120 | Matches all chat-template/tool markers (`</?thought>`, `<|begin_of_thought|>`, `<|end_of_thought|>`, `<|im_start|>`, `<|im_end|>`, `<|tool_call|>`, `<tool_call|>`, `<|tool_response>`). |
+| `_TEXT_CALL_RE` | 122 | Matches a text directive: `call:name{` (name may contain `.`: `.-`). Negative lookbehind avoids matching parts of identifiers. |
+| `_clean_stream_text()` | 125-134 | Strips marker tokens and converts `<|"|>` into `"`. Applies to each thinking/content chunk before display and accumulation. |
+| `_brace_balanced()` | 137-165 | Finds the matching `}` for a `{`, skipping JSON string literals, so braces/commas inside argument values don't break nesting. Returns `None` when unclosed. |
+| `_BARE_KEY_RE` / `_lenient_json_fix()` | 168, 173-241 | Repairs lenient JSON: quotes bare object keys (`{content:"x"}`) and escapes literal control characters (e.g. `\n`) inside string values only. Never rewrites anything outside key position / string literals. |
+| `_parse_tool_arguments()` | 244-255 | Normalizes `<|"|">` quoting, applies `_lenient_json_fix`, strict-parses; `None` when not parseable or not an object. |
+| `_text_call_tail_start()` | 258-270 | Index where a trailing in-progress *or just-closed* `call:` directive starts; used by display deferral to decide what must be held back. |
+| `_extract_text_tool_calls()` | 273-297 | Parses every directive in text, returns `(remaining, calls)` — remaining text with the directives removed plus OpenAI-style call dicts. |
+| `_stream_to_display()` | 300-312 | Deferred-display accumulation: emits every prefix that cannot still be the start of a directive, holds back the directive tail. |
+| `_flush_pending_display()` | 315-322 | Drains the deferred buffer, scrubbing any fully-formed directive that ended exactly at the stream boundary. |
 
 ---
 
 ## Integration into `run_with_tools()` (`tool_base/engine.py`)
 
-- Per-round deferred buffers are reset at `engine.py:636-637`; thinking/display
+- Per-round deferred buffers are reset at `engine.py:638-639`; thinking/display
   are emitted through the `_emit_thinking` / `_emit_content` closures
-  (`engine.py:521-527`) so a single emit path serves display, thought-logger and
+  (`engine.py:523-529`) so a single emit path serves display, thought-logger and
   `show_thinking`.
-- Thinking chunks (`engine.py:676-691`): each chunk is cleaned with
+- Thinking chunks (`engine.py:678-693`): each chunk is cleaned with
   `_clean_stream_text()` before being accumulated into `think_text` /
   `response_thinking` and routed through `_stream_to_display`. Markers never
   reach the screen.
-- Content chunks (`engine.py:693-714`): likewise cleaned, and the thinking
+- Content chunks (`engine.py:695-716`): likewise cleaned, and the thinking
   buffer is flushed first when the model transitions from thinking to output.
-- After the stream closes (`engine.py:728-729`): both deferred buffers are
+- After the stream closes (`engine.py:730-731`): both deferred buffers are
   flushed so a directive split across the last chunks is still fully emitted or
   scrubbed.
-- Round end (`engine.py:734-741`): `_extract_text_tool_calls()` runs on
+- Round end (`engine.py:736-743`): `_extract_text_tool_calls()` runs on
   `response_thinking` and `response_content`. Parsed calls are merged into
   `response_tool_calls` **only when `response_tool_calls is None`** — structured
   backend tool calls always keep priority. The scrubbed text replaces
   `response_thinking`, `response_content` and `think_text`.
 
-Because the directives were removed from `response_thinking` before it is used
-at `engine.py:777` (`<thought>\n{response_thinking}\n</thought>`), the stored
-assistant message and therefore the re-injected context stay clean — the
-corruption can no longer replay itself on subsequent rounds.
+The directives are removed from `response_thinking` / `response_content` before
+the assistant message is stored (`engine.py:775-781`), and — since the task_004
+follow-up — prior thinking is **no longer wrapped into `content` at all** (see
+`003_reinjection_sideeffect.md`). The stored assistant message and the context
+re-sent on the next round therefore stay clean, and the corruption can no longer
+replay itself on subsequent rounds.
 
 ---
 
@@ -79,13 +81,14 @@ corruption can no longer replay itself on subsequent rounds.
 
 ## Verification
 
-`lama_ole/tests/test_text_tool_calls.py` — 33 tests, all passing:
+`lama_ole/tests/test_text_tool_calls.py` — 35 tests, all passing:
 
 - **Helper units** for every new helper: marker stripping, quoting restoration,
-  brace matching (nested objects, strings with braces), lenient JSON repair
-  (bare keys, control chars, commas inside strings, no false rewrites), tail
-  detection, directive extraction (empty/`None` input, multiple calls, unclosed
-  braces), and deferred display buffering/flushing.
+  Qwen3 native thinking-token stripping (`<|begin_of_thought|>` /
+  `<|end_of_thought|>`), brace matching (nested objects, strings with braces),
+  lenient JSON repair (bare keys, control chars, commas inside strings, no false
+  rewrites), tail detection, directive extraction (empty/`None` input, multiple
+  calls, unclosed braces), and deferred display buffering/flushing.
 - **Integration** (`run_with_tools()` with a scripted `ChatChunk` stream): a
   stream consisting only of polluted thinking (the exact `create_new_file`
   example from the task) now:
@@ -97,12 +100,16 @@ corruption can no longer replay itself on subsequent rounds.
 - A `capsys` test asserts the markers and directive never appear in printed
   output (split across several `ChatChunk`s, including a directive whose `{`-body
   continues past the previous chunk).
+- A task_004 regression test asserts a tool round's prior thinking is stored in
+  the `thinking` field but is **not** re-injected into `content` (no
+  `<thought>` in the stored assistant message nor in the messages re-sent to the
+  backend on the next round).
 
 Full suite:
 
 ```bash
-python3 -m pytest tests/ -q                 # 690 passed, 4 skipped
-python3 tests/run_all_tests.py              # 723 passed, 4 skipped — "ALL TEST SUITES PASSED."
+python3 -m pytest tests/ -q                 # 35 passed (test_text_tool_calls.py)
+python3 tests/run_all_tests.py              # "ALL TEST SUITES PASSED."
 ```
 
 Python 3.9 syntax compatibility is kept (AST check passes with

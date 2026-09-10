@@ -62,6 +62,14 @@ class TestCleanStreamText:
         cleaned = _clean_stream_text('content:<|"|>x<|"|>')
         assert cleaned == 'content:"x"'
 
+    def test_strips_qwen3_native_thinking_tokens(self):
+        text = "<|begin_of_thought|>let me think<|end_of_thought|>inner"
+        cleaned = _clean_stream_text(text)
+        assert "begin_of_thought" not in cleaned
+        assert "end_of_thought" not in cleaned
+        assert "let me think" in cleaned
+        assert "inner" in cleaned
+
     def test_empty_input(self):
         assert _clean_stream_text("") == ""
         assert _clean_stream_text(None) == ""
@@ -310,6 +318,38 @@ def test_text_tool_call_markers_not_printed_in_thought_block(capsys):
     assert "<|tool_call|>" not in out
     assert "call:create_new_file" not in out
     assert "I have both files now." in out
+
+
+def test_tool_round_thinking_not_reinjected_into_content():
+    streams = [
+        iter(
+            [
+                _chunk(
+                    thinking="plan the move",
+                    tool_calls=[
+                        {
+                            "function": {
+                                "name": "create_new_file",
+                                "arguments": {"path": "a.txt"},
+                            }
+                        }
+                    ],
+                )
+            ]
+        ),
+        iter([_chunk(content="done")]),
+    ]
+    client = StreamClient(streams)
+    messages = [{"role": "user", "content": "hi"}]
+    run_with_tools(
+        **_run_kwargs(client, messages, loaded_tools=[_echo_tool("create_new_file")])
+    )
+    assistant = [m for m in messages if m.get("role") == "assistant"][0]
+    assert assistant["thinking"] == "plan the move"
+    assert "<thought>" not in (assistant.get("content") or "")
+    # Round 2 re-sends the conversation to the backend; no <thought> leaks in.
+    sent = client.calls[1]["messages"]
+    assert all("<thought>" not in (m.get("content") or "") for m in sent)
 
 
 def test_structured_tool_calls_take_priority_over_text_calls():
