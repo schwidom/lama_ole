@@ -23,7 +23,7 @@ from backends.registry import BACKEND_REGISTRY, SUPPORTED_BACKENDS
 
 
 def test_supported_backends_includes_all():
-    expected = {"ollama", "llamacpp", "openai_compat", "eliza", "echo"}
+    expected = {"ollama", "llamacpp", "openai_compat", "groq", "eliza", "echo"}
     assert set(SUPPORTED_BACKENDS) == expected
 
 
@@ -53,6 +53,12 @@ def test_create_openai_compat():
 def test_create_llamacpp():
     backend = create_backend("llamacpp", host="http://myhost:9090")
     assert backend.name == "llamacpp"
+
+
+def test_create_groq():
+    backend = create_backend("groq", api_key="sk-groq-test")
+    assert backend.name == "groq"
+    assert isinstance(backend, LlmBackend)
 
 
 def test_create_unknown_raises():

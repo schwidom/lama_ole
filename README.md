@@ -107,6 +107,7 @@ lama_ole talks to an LLM through a pluggable backend. Choose one with
 | `ollama` | Ollama, via the `ollama` Python library | `http://localhost:11434` | not required |
 | `llamacpp` | llama.cpp server (OpenAI-compatible API) | `http://localhost:8080` | not required |
 | `openai_compat` | Any OpenAI-compatible endpoint (e.g. vLLM, TGI) | `https://localhost:443` | `--api-key` |
+| `groq` | Groq Cloud LPU inference API | `https://api.groq.com/openai` | `--api-key` / `GROQ_API_KEY` |
 | `eliza` | Built-in scripted mock (no server needed) | `http://localhost:80` | — |
 | `echo` | Built-in echo mock (no server needed) | `http://localhost:80` | — |
 
@@ -614,7 +615,7 @@ to generate when you pressed Ctrl-C.
 | :--- | :--- | :--- |
 | `-h, --help` | Show help message and exit | |
 | `-V, --version` | Show program version and exit | |
-| `--backend NAME` | LLM backend: `ollama`, `llamacpp`, `openai_compat`, `eliza`, `echo` | `ollama` |
+| `--backend NAME` | LLM backend: `ollama`, `llamacpp`, `openai_compat`, `groq`, `eliza`, `echo` | `ollama` |
 | `--api-key KEY` | API key for backends that require authentication | |
 | `--host HOST` | Host endpoint of the chosen backend (each backend defines its own default) | backend-specific |
 | `-m, --model MODEL` | Model name to use | (required) |

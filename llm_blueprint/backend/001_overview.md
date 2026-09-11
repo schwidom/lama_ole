@@ -20,6 +20,7 @@ The goal is to decouple lama_ole from Ollama by introducing a **backend abstract
 | **Ollama** | Primary/default backend (existing) | `ollama` Python library |
 | **llama.cpp** | Local inference via llama.cpp server HTTP API | HTTP client only (stdlib `urllib` or `requests` if available) |
 | **OpenAI-compatible** | Any OpenAI API-compatible server (vLLM, text-generation-webui, LM Studio, etc.) | HTTP client only |
+| **Groq** | Groq Cloud LPU API | HTTP client only |
 | **Eliza** | Testing backend — deterministic scripted responses | None |
 | **Echo Mock** | Testing backend — echoes input back, supports tool calling | None |
 

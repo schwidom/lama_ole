@@ -1,6 +1,6 @@
 ## Project Overview — `lama_ole`
 
-**What it is:** A CLI wrapper around pluggable LLM backends (default: [Ollama](https://ollama.com)) for interacting with local/remote LLMs, supporting streaming chat, tool calling, thinking-process display, and media understanding (image/video/audio). Backends: `ollama`, `llamacpp`, `openai_compat`, plus `eliza`/`echo` mocks.
+**What it is:** A CLI wrapper around pluggable LLM backends (default: [Ollama](https://ollama.com)) for interacting with local/remote LLMs, supporting streaming chat, tool calling, thinking-process display, and media understanding (image/video/audio). Backends: `ollama`, `llamacpp`, `openai_compat`, `groq`, plus `eliza`/`echo` mocks.
 
 ---
 
@@ -21,6 +21,7 @@ lama_ole/
 │   ├── ollama_backend.py    # OllamaBackend (native ollama library; keep_alive, list/ps/stop/transfer)
 │   ├── llamacpp_backend.py  # LlamaCppBackend (subclass of OpenAICompatBackend, port 8080, no api key)
 │   ├── openai_compat_backend.py  # SSE streaming, reasoning_content->thinking, tool_call accumulation
+│   ├── groq_backend.py      # GroqBackend (Groq Cloud API, reasoning_format="parsed", GROQ_API_KEY)
 │   ├── echo_backend.py      # EchoMockBackend (offline mock)
 │   └── eliza_backend.py     # ElizaBackend (scripted mock)
 ├── tool_base/               # Core engine package: @tool decorator, Tool registry, run_with_tools loop, safety prompt
