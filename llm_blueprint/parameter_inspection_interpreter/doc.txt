@@ -1,0 +1,48 @@
+LI Interpreter User Documentation
+---------------------------------
+
+This LI (Lisp‐like) interpreter selects parameters for your Python program
+based on a set of attributes. Each parameter may have values from one or more
+sources: def (default), conf (config), env (environment), and arg (argument).
+
+Syntax:
+
+1. Source Tokens:
+   • "def"   – selects parameters for which a default value is allowed.
+   • "conf"  – selects parameters for which a config value is allowed.
+   • "env"   – selects parameters for which an environment variable is allowed.
+   • "arg"   – selects parameters for which an argument is allowed.
+
+2. Value Requirement:
+   • Prepend a source with "s" to require that the source is not only allowed but
+     also has a value set.
+       Example: "s env" selects parameters where the environment variable is set.
+     Note: For "def", since a default value is automatically set when defined,
+           "s def" behaves the same as "def".
+
+3. Inversion:
+   • Prepend an expression with "!" to invert its truth value.
+       Example: "! def" selects parameters that do NOT have a default value defined.
+
+4. Grouping with Logical Operators:
+   • Use parentheses to group expressions.
+   • "(and expr1 expr2 ...)" returns True only if all expressions are True.
+   • "(or expr1 expr2 ...)" returns True if at least one expression is True.
+     (By convention, an empty "and" returns True and an empty "or" returns False.)
+
+Examples:
+  • "def" 
+       → selects parameters with a default value defined.
+  • "! def"
+       → selects parameters without a default value defined.
+  • "env"
+       → selects parameters with an environment variable allowed.
+  • "s env"
+       → selects parameters with an environment variable set.
+  • "(and def conf)"
+       → selects parameters with a default value defined and a config value allowed.
+  • "(or arg env)"
+       → selects parameters with an argument value allowed or an environment variable allowed.
+  • "(and s env def ! conf)"
+       → selects parameters that have an environment value set, have a default defined,
+         and for which the config value is not allowed.

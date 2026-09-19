@@ -105,7 +105,7 @@ def test_inspection_as_natural(capsys):
 
 
 def test_overwritten_comments(capsys):
-    argv = ["--show-parameters", "--as-parameters", "--model", "winning_model"]
+    argv = ["--show", "arg", "--as-parameters", "--model", "winning_model"]
     initial_env = {"LAMA_OLE_MODEL": "env_model"}
     config_dict = {"LAMA_OLE_MODEL": "config_model"}
 
@@ -114,7 +114,7 @@ def test_overwritten_comments(capsys):
 
     captured = capsys.readouterr().out
     assert 'winning_model' in captured
-    assert '# (overrides environment: "env_model", config: "config_model")' in captured
+    assert '# parameters (overrides environment: "env_model", config: "config_model")' in captured
 
 
 def test_releasing_selectors_between_as_flags(capsys):

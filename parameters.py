@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from parameter_inspection_interpreter import interpret
 from tool_base import DEFAULT_CTX_COMPACT_THRESHOLD, sanitize_ctx_threshold
 from version import VERSION
 
@@ -412,60 +413,11 @@ PARAMETERS: List[ParameterSpec] = [
     ),
     # --- Parameter inspection (--show-* selectors + --as-* output formats) ---
     ParameterSpec(
-        name="show_config",
-        flags=["--show-config"],
-        action="store_true",
+        name="show",
+        flags=["--show"],
+        default=False,
         is_inspection=True,
-        help="Include values that originate from the config files (lama_ole.env)",
-    ),
-    ParameterSpec(
-        name="show_nonconfig",
-        flags=["--show-nonconfig"],
-        action="store_true",
-        is_inspection=True,
-        help="Exclude values that originate from the config files (lama_ole.env)",
-    ),
-    ParameterSpec(
-        name="show_environment",
-        flags=["--show-environment"],
-        action="store_true",
-        is_inspection=True,
-        help="Include values that originate from shell environment variables",
-    ),
-    ParameterSpec(
-        name="show_nonenvironment",
-        flags=["--show-nonenvironment"],
-        action="store_true",
-        is_inspection=True,
-        help="Exclude values that originate from shell environment variables",
-    ),
-    ParameterSpec(
-        name="show_parameters",
-        flags=["--show-parameters"],
-        action="store_true",
-        is_inspection=True,
-        help="Include values set explicitly on the command line",
-    ),
-    ParameterSpec(
-        name="show_nonparameters",
-        flags=["--show-nonparameters"],
-        action="store_true",
-        is_inspection=True,
-        help="Exclude values set explicitly on the command line",
-    ),
-    ParameterSpec(
-        name="show_defaults",
-        flags=["--show-defaults"],
-        action="store_true",
-        is_inspection=True,
-        help="Include values that come from the built-in defaults",
-    ),
-    ParameterSpec(
-        name="show_nondefaults",
-        flags=["--show-nondefaults"],
-        action="store_true",
-        is_inspection=True,
-        help="Show only values that differ from the built-in defaults",
+        help="expects a selector script for the selection of parameter types, used together with the --as-* parameters",
     ),
     ParameterSpec(
         name="as_parameters",
@@ -492,14 +444,7 @@ PARAMETERS: List[ParameterSpec] = [
 
 # Add inspection parameters
 INSPECTION_FLAGS = [
-    "--show-config",
-    "--show-nonconfig",
-    "--show-environment",
-    "--show-nonenvironment",
-    "--show-parameters",
-    "--show-nonparameters",
-    "--show-defaults",
-    "--show-nondefaults",
+    "--show",
     "--as-parameters",
     "--as-environment",
     "--as-natural",
@@ -620,18 +565,6 @@ def parse_cli_explicit_params(argv: List[str]) -> Dict[str, Any]:
 
     return explicit
 
-@dataclass
-class Selectors:
-    config : bool = False
-    nonconfig : bool = False
-    environment : bool = False
-    nonenvironment : bool = False
-    parameters : bool = False
-    nonparameters : bool = False
-    defaults : bool = False
-    nondefaults : bool = False
-
-
 def process_inspection_flags(
     argv: List[str],
     config_dict: Dict[str, str],
@@ -644,42 +577,32 @@ def process_inspection_flags(
 
     cli_explicit = parse_cli_explicit_params(argv)
 
-    active_selectors: Selectors = Selectors()
+    fill_selector_script = False
+    selector_script : Optional[str] = None
 
     for token in argv:
-        if token == "--show-config":
-            active_selectors.config= True
-        elif token in ("--show-nonconfig"):
-            active_selectors.nonconfig= True
-        elif token == "--show-environment":
-            active_selectors.environment= True
-        elif token == "--show-nonenvironment":
-            active_selectors.nonenvironment= True
-        elif token == "--show-parameters":
-            active_selectors.parameters= True
-        elif token == "--show-nonparameters":
-            active_selectors.nonparameters= True
-        elif token == "--show-defaults":
-            active_selectors.defaults= True
-        elif token in ("--show-nondefaults"):
-            active_selectors.nondefaults= True
+        if fill_selector_script :
+            selector_script = token
+            fill_selector_script = False
+        elif token == "--show":
+            fill_selector_script = True
         elif token in ("--as-parameters", "--as-environment", "--as-natural"):
             mode = token[5:]  # 'parameters', 'environment', or 'natural'
             _output_inspection_group(
                 mode=mode,
-                selectors=active_selectors,
+                selector_script=selector_script,
                 config_dict=config_dict,
                 initial_env=initial_env,
                 cli_explicit=cli_explicit,
             )
-            active_selectors= Selectors()
+            selector_script = None
 
     return True
 
 
 def _output_inspection_group(
     mode: str,
-    selectors: Selectors,
+    selector_script: Optional[str],
     config_dict: Dict[str, str],
     initial_env: Dict[str, str],
     cli_explicit: Dict[str, Any],
@@ -690,24 +613,34 @@ def _output_inspection_group(
         if spec.name == "version" or spec.is_inspection:
             continue
 
+        attributes=set()
+
         # Evaluate tiers
         val_param = cli_explicit.get(spec.name)
         has_param = spec.name in cli_explicit
+        if has_param : attributes.add( "has_arg")
+        if val_param : attributes.add( "has_arg_set")
 
         val_env = None
         has_env = False
         if spec.env_var and spec.env_var in initial_env:
             has_env = True
             val_env = initial_env[spec.env_var]
+        if spec.env_var : attributes.add( "has_env")
+        if spec.env_var in initial_env : attributes.add( "has_env_set")
 
         val_config = None
         has_config = False
         if spec.env_var and spec.env_var in config_dict:
             has_config = True
             val_config = config_dict[spec.env_var]
+        if spec.env_var : attributes.add( "has_conf")
+        if spec.env_var in config_dict : attributes.add( "has_conf_set")
 
         val_default = spec.default
         has_default = val_default is not None or spec.action in ("store_true", argparse.BooleanOptionalAction)
+        if has_default : attributes.add( "has_def")
+        if val_default in config_dict : attributes.add( "has_def_set")
 
         # Determine winning value and tier
         winning_tier = None
@@ -722,46 +655,14 @@ def _output_inspection_group(
         elif has_config:
             winning_tier = "config"
             winning_val = val_config
-        elif selectors.defaults and has_default:
+        elif has_default:
             winning_tier = "defaults"
             winning_val = val_default
 
         if winning_tier is None:
             continue
 
-        # Check nondefaults filter
-        if selectors.nondefaults and not selectors.defaults:
-            # Must differ from spec.default or be non-default source
-            if winning_tier == "defaults":
-                continue
-
-        # Check source filter match
-
-
-        # if winning_tier == "parameters" and not (selectors.parameters or selectors.nondefaults):
-        #     continue
-        # if winning_tier == "environment" and not (selectors.environment or selectors.nondefaults):
-        #     continue
-        # if winning_tier == "config" and not (selectors.config or selectors.nondefaults):
-        #     continue
-        # if winning_tier == "defaults" and not selectors.defaults:
-        #     continue
-
-        if selectors.defaults and not has_default :
-            continue
-        if selectors.nondefaults and has_default :
-            continue
-        if selectors.config and not has_config :
-            continue
-        if selectors.nonconfig and has_config :
-            continue
-        if selectors.environment and not has_env :
-            continue
-        if selectors.nonenvironment and has_env :
-            continue
-        if selectors.parameters and not has_param :
-            continue
-        if selectors.nonparameters and has_param :
+        if selector_script is not None and not interpret( attributes, selector_script) :
             continue
 
         # Build overwritten comments
@@ -773,7 +674,7 @@ def _output_inspection_group(
         if has_default and winning_tier != "defaults":
             overridden.append(f'default: "{val_default}"')
 
-        comment = f' # {winning_tier} '
+        comment = f' # {winning_tier}'
         if overridden:
             comment += f" (overrides {', '.join(overridden)})"
 
