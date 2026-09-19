@@ -658,9 +658,9 @@ to generate when you pressed Ctrl-C.
 | `--show-config` | Include values that originate from the config files (`lama_ole.env`) | |
 | `--show-nonconfig` | Exclude values that originate from the config files | |
 | `--show-environment` | Include values that originate from shell environment variables | |
-| `--show-noenvironment` | Exclude values that originate from shell environment variables | |
+| `--show-nonenvironment` | Exclude values that originate from shell environment variables | |
 | `--show-parameters` | Include values set explicitly on the command line | |
-| `--show-noparameters` | Exclude values set explicitly on the command line | |
+| `--show-nonparameters` | Exclude values set explicitly on the command line | |
 | `--show-defaults` | Include values that come from the built-in defaults | |
 | `--show-nondefaults` | Show only values that differ from the built-in defaults | |
 | `--as-parameters` | Print the selected values as CLI flags and exit | |
@@ -691,8 +691,8 @@ which value **tiers** are included:
 | Tier | Source | Select |
 | :--- | :--- | :--- |
 | Config | `./lama_ole.env` / `~/.config/lama_ole/lama_ole.env` | `--show-config` / `--show-nonconfig` |
-| Environment | shell env vars (`LAMA_OLE_*`) | `--show-environment` / `--show-noenvironment` |
-| Parameters | values set on the command line | `--show-parameters` / `--show-noparameters` |
+| Environment | shell env vars (`LAMA_OLE_*`) | `--show-environment` / `--show-nonenvironment` |
+| Parameters | values set on the command line | `--show-parameters` / `--show-nonparameters` |
 | Defaults | built-in defaults | `--show-defaults` / `--show-nondefaults` |
 
 - If no `--show-*` selector is given, all tiers are included.

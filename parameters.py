@@ -14,9 +14,7 @@ from version import VERSION
 
 from backends.registry import SUPPORTED_BACKENDS
 
-_TRUE_VALUES = {"1", "true", "yes", "on"}
-_FALSE_VALUES = {"0", "false", "no", "off"}
-
+from constants import TRUE_VALUES, FALSE_VALUES
 
 def _parse_bool(val: Any) -> Optional[bool]:
     if isinstance(val, bool):
@@ -24,9 +22,9 @@ def _parse_bool(val: Any) -> Optional[bool]:
     if val is None:
         return None
     s = str(val).lower().strip()
-    if s in _TRUE_VALUES:
+    if s in TRUE_VALUES:
         return True
-    if s in _FALSE_VALUES:
+    if s in FALSE_VALUES:
         return False
     return None
 
@@ -435,8 +433,8 @@ PARAMETERS: List[ParameterSpec] = [
         help="Include values that originate from shell environment variables",
     ),
     ParameterSpec(
-        name="show_noenvironment",
-        flags=["--show-noenvironment"],
+        name="show_nonenvironment",
+        flags=["--show-nonenvironment"],
         action="store_true",
         is_inspection=True,
         help="Exclude values that originate from shell environment variables",
@@ -449,8 +447,8 @@ PARAMETERS: List[ParameterSpec] = [
         help="Include values set explicitly on the command line",
     ),
     ParameterSpec(
-        name="show_noparameters",
-        flags=["--show-noparameters"],
+        name="show_nonparameters",
+        flags=["--show-nonparameters"],
         action="store_true",
         is_inspection=True,
         help="Exclude values set explicitly on the command line",
@@ -496,11 +494,10 @@ PARAMETERS: List[ParameterSpec] = [
 INSPECTION_FLAGS = [
     "--show-config",
     "--show-nonconfig",
-    "show-nonconfig",
     "--show-environment",
-    "--show-noenvironment",
+    "--show-nonenvironment",
     "--show-parameters",
-    "--show-noparameters",
+    "--show-nonparameters",
     "--show-defaults",
     "--show-nondefaults",
     "--as-parameters",
@@ -623,6 +620,17 @@ def parse_cli_explicit_params(argv: List[str]) -> Dict[str, Any]:
 
     return explicit
 
+@dataclass
+class Selectors:
+    config : bool = False
+    nonconfig : bool = False
+    environment : bool = False
+    nonenvironment : bool = False
+    parameters : bool = False
+    nonparameters : bool = False
+    defaults : bool = False
+    nondefaults : bool = False
+
 
 def process_inspection_flags(
     argv: List[str],
@@ -636,57 +644,47 @@ def process_inspection_flags(
 
     cli_explicit = parse_cli_explicit_params(argv)
 
-    active_selectors: Set[str] = set()
+    active_selectors: Selectors = Selectors()
 
     for token in argv:
         if token == "--show-config":
-            active_selectors.add("config")
-        elif token in ("--show-nonconfig", "show-nonconfig"):
-            active_selectors.discard("config")
+            active_selectors.config= True
+        elif token in ("--show-nonconfig"):
+            active_selectors.nonconfig= True
         elif token == "--show-environment":
-            active_selectors.add("environment")
-        elif token == "--show-noenvironment":
-            active_selectors.discard("environment")
+            active_selectors.environment= True
+        elif token == "--show-nonenvironment":
+            active_selectors.nonenvironment= True
         elif token == "--show-parameters":
-            active_selectors.add("parameters")
-        elif token == "--show-noparameters":
-            active_selectors.discard("parameters")
+            active_selectors.parameters= True
+        elif token == "--show-nonparameters":
+            active_selectors.nonparameters= True
         elif token == "--show-defaults":
-            active_selectors.add("defaults")
-        elif token in ("--show-nondefaults", "--show-nondefault"):
-            active_selectors.add("nondefaults")
+            active_selectors.defaults= True
+        elif token in ("--show-nondefaults"):
+            active_selectors.nondefaults= True
         elif token in ("--as-parameters", "--as-environment", "--as-natural"):
             mode = token[5:]  # 'parameters', 'environment', or 'natural'
             _output_inspection_group(
                 mode=mode,
-                selectors=set(active_selectors),
+                selectors=active_selectors,
                 config_dict=config_dict,
                 initial_env=initial_env,
                 cli_explicit=cli_explicit,
             )
-            active_selectors.clear()
+            active_selectors= Selectors()
 
     return True
 
 
 def _output_inspection_group(
     mode: str,
-    selectors: Set[str],
+    selectors: Selectors,
     config_dict: Dict[str, str],
     initial_env: Dict[str, str],
     cli_explicit: Dict[str, Any],
 ):
     """Output values matching selectors in specified mode."""
-    # Determine which tiers are included
-    show_config = "config" in selectors
-    show_env = "environment" in selectors
-    show_params = "parameters" in selectors
-    show_defaults = "defaults" in selectors
-    show_nondefaults = "nondefaults" in selectors
-
-    # If no selectors given, default to matching all set sources
-    if not selectors:
-        show_config = show_env = show_params = show_defaults = True
 
     for spec in PARAMETERS:
         if spec.name == "version" or spec.is_inspection:
@@ -724,7 +722,7 @@ def _output_inspection_group(
         elif has_config:
             winning_tier = "config"
             winning_val = val_config
-        elif show_defaults and has_default:
+        elif selectors.defaults and has_default:
             winning_tier = "defaults"
             winning_val = val_default
 
@@ -732,35 +730,52 @@ def _output_inspection_group(
             continue
 
         # Check nondefaults filter
-        if show_nondefaults and not show_defaults:
+        if selectors.nondefaults and not selectors.defaults:
             # Must differ from spec.default or be non-default source
             if winning_tier == "defaults":
                 continue
 
         # Check source filter match
-        if winning_tier == "parameters" and not (show_params or show_nondefaults):
+
+
+        # if winning_tier == "parameters" and not (selectors.parameters or selectors.nondefaults):
+        #     continue
+        # if winning_tier == "environment" and not (selectors.environment or selectors.nondefaults):
+        #     continue
+        # if winning_tier == "config" and not (selectors.config or selectors.nondefaults):
+        #     continue
+        # if winning_tier == "defaults" and not selectors.defaults:
+        #     continue
+
+        if selectors.defaults and not has_default :
             continue
-        if winning_tier == "environment" and not (show_env or show_nondefaults):
+        if selectors.nondefaults and has_default :
             continue
-        if winning_tier == "config" and not (show_config or show_nondefaults):
+        if selectors.config and not has_config :
             continue
-        if winning_tier == "defaults" and not show_defaults:
+        if selectors.nonconfig and has_config :
+            continue
+        if selectors.environment and not has_env :
+            continue
+        if selectors.nonenvironment and has_env :
+            continue
+        if selectors.parameters and not has_param :
+            continue
+        if selectors.nonparameters and has_param :
             continue
 
         # Build overwritten comments
         overridden = []
-        if winning_tier == "parameters":
-            if has_env:
-                overridden.append(f'environment: "{val_env}"')
-            if has_config:
-                overridden.append(f'config: "{val_config}"')
-        elif winning_tier == "environment":
-            if has_config:
-                overridden.append(f'config: "{val_config}"')
+        if has_env and winning_tier != "environment":
+            overridden.append(f'environment: "{val_env}"')
+        if has_config and winning_tier != "config":
+            overridden.append(f'config: "{val_config}"')
+        if has_default and winning_tier != "defaults":
+            overridden.append(f'default: "{val_default}"')
 
-        comment = ""
+        comment = f' # {winning_tier} '
         if overridden:
-            comment = f" # (overrides {', '.join(overridden)})"
+            comment += f" (overrides {', '.join(overridden)})"
 
         # Format output
         _print_formatted_param(spec, mode, winning_val, winning_tier, comment)

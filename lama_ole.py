@@ -12,6 +12,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from constants import TRUE_VALUES, FALSE_VALUES
+
 # Ensure the script's directory is in sys.path for sibling imports
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
@@ -50,9 +52,6 @@ from chat import (
 
 _ENV_FILE_USER = os.path.join(os.path.expanduser("~"), ".config", "lama_ole", "lama_ole.env")
 _ENV_FILE_PROJECT = os.path.join(os.getcwd(), "lama_ole.env")
-
-_TRUE_VALUES = {"1", "true", "yes", "on"}
-_FALSE_VALUES = {"0", "false", "no", "off"}
 
 
 def _parse_env_file(path):
@@ -125,9 +124,9 @@ def _env_bool(name, default):
     if not value:
         return default
     lowered = value.lower()
-    if lowered in _TRUE_VALUES:
+    if lowered in TRUE_VALUES:
         return True
-    if lowered in _FALSE_VALUES:
+    if lowered in FALSE_VALUES:
         return False
     print(f"Warning: ignoring invalid boolean for {name}: {value!r}",
           file=sys.stderr)
