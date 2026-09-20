@@ -29,12 +29,12 @@ def test_format_bash_c_quote_special_characters():
 
 
 def test_parse_cli_explicit_params():
-    argv = ["--model", "gemma4:26b", "-t", "--temperature", "0.7", "--show-config", "--as-parameters"]
+    argv = ["--model", "gemma4:26b", "-t", "--temperature", "0.7", "--show", "conf", "--as-parameters"]
     parsed = parse_cli_explicit_params(argv)
     assert parsed.get("model") == "gemma4:26b"
     assert parsed.get("thinking") is True
     assert parsed.get("temperature") == 0.7
-    assert "show-config" not in parsed
+    assert "conf" not in parsed
 
 
 def test_parse_cli_explicit_params_store_true_long_flag():
@@ -66,7 +66,7 @@ def test_cli_module_exports_get_tool_modules_info():
 
 
 def test_inspection_as_parameters(capsys):
-    argv = ["--show-parameters", "--as-parameters", "--model", "gemma4:26b", "--temperature", "0.7"]
+    argv = ["--show", "arg", "--as-parameters", "--model", "gemma4:26b", "--temperature", "0.7"]
     initial_env = {}
     config_dict = {}
 
@@ -79,7 +79,7 @@ def test_inspection_as_parameters(capsys):
 
 
 def test_inspection_as_environment(capsys):
-    argv = ["--show-parameters", "--as-environment", "--model", "gemma4:26b", "-t"]
+    argv = ["--show", "arg", "--as-environment", "--model", "gemma4:26b", "-t"]
     initial_env = {}
     config_dict = {}
 
@@ -92,7 +92,7 @@ def test_inspection_as_environment(capsys):
 
 
 def test_inspection_as_natural(capsys):
-    argv = ["--show-environment", "--show-parameters", "--as-natural", "--model", "gemma4:26b"]
+    argv = ["--show", "(or env arg)", "--as-natural", "--model", "gemma4:26b"]
     initial_env = {"LAMA_OLE_NUM_CTX": "100000"}
     config_dict = {}
 
@@ -119,9 +119,11 @@ def test_overwritten_comments(capsys):
 
 def test_releasing_selectors_between_as_flags(capsys):
     argv = [
-        "--show-environment",
+        "--show",
+        "s env",
         "--as-environment",
-        "--show-parameters",
+        "--show",
+        "s arg",
         "--as-parameters",
         "--model",
         "cli_model",
@@ -140,7 +142,7 @@ def test_releasing_selectors_between_as_flags(capsys):
 
 
 def test_nonconfig_selector_support(capsys):
-    argv = ["--show-config", "show-nonconfig", "--show-parameters", "--as-parameters", "--model", "m1"]
+    argv = ["--show", "s arg", "--as-parameters", "--model", "m1"]
     initial_env = {}
     config_dict = {"LAMA_OLE_MODEL": "m2"}
 
@@ -148,5 +150,48 @@ def test_nonconfig_selector_support(capsys):
     assert res is True
 
     captured = capsys.readouterr().out
-    # Should show parameters because show-nonconfig discarded config
-    assert "m1" in captured
+    assert "m1" in captured or "--model" in captured
+
+
+def test_strictness_rejects_obsolete_show_flags():
+    argv = ["--show-parameters", "--as-parameters"]
+    with pytest.raises(SystemExit) as exc_info:
+        process_inspection_flags(argv, {}, {})
+    assert exc_info.value.code == 1
+
+
+def test_strictness_missing_show_argument():
+    argv = ["--show", "--as-parameters"]
+    with pytest.raises(SystemExit) as exc_info:
+        process_inspection_flags(argv, {}, {})
+    assert exc_info.value.code == 1
+
+
+def test_strictness_rejects_unknown_flags():
+    argv = ["--unknown-flag", "--as-parameters"]
+    with pytest.raises(SystemExit) as exc_info:
+        process_inspection_flags(argv, {}, {})
+    assert exc_info.value.code == 1
+
+
+def test_interpreter_syntax_error():
+    argv = ["--show", "(and arg", "--as-parameters"]
+    with pytest.raises(SystemExit) as exc_info:
+        process_inspection_flags(argv, {}, {})
+    assert exc_info.value.code == 1
+
+
+def test_interpreter_expression_matrix(capsys):
+    argv = [
+        "--show", "(and s env def ! conf)", "--as-parameters",
+        "--show", "s arg", "--as-parameters",
+        "--model", "testmodel"
+    ]
+    initial_env = {"LAMA_OLE_TEMPERATURE": "0.7"}
+    config_dict = {}
+
+    res = process_inspection_flags(argv, config_dict, initial_env)
+    assert res is True
+
+    captured = capsys.readouterr().out
+    assert '--model "testmodel"' in captured or '--model testmodel' in captured

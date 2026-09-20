@@ -411,11 +411,11 @@ PARAMETERS: List[ParameterSpec] = [
         action="store_true",
         help="Initialize the environment and enter interactive mode",
     ),
-    # --- Parameter inspection (--show-* selectors + --as-* output formats) ---
+    # --- Parameter inspection (--show <script> selector + --as-* output formats) ---
     ParameterSpec(
         name="show",
         flags=["--show"],
-        default=False,
+        default=None,
         is_inspection=True,
         help="expects a selector script for the selection of parameter types, used together with the --as-* parameters",
     ),
@@ -519,7 +519,13 @@ def parse_cli_explicit_params(argv: List[str]) -> Dict[str, Any]:
     while i < n:
         arg = argv[i]
         if arg in INSPECTION_FLAGS:
-            i += 1
+            if arg == "--show":
+                if i + 1 < n and argv[i + 1] not in ("--as-parameters", "--as-environment", "--as-natural"):
+                    i += 2
+                else:
+                    i += 1
+            else:
+                i += 1
             continue
 
         if arg in flag_to_spec:
@@ -577,15 +583,27 @@ def process_inspection_flags(
 
     cli_explicit = parse_cli_explicit_params(argv)
 
-    fill_selector_script = False
-    selector_script : Optional[str] = None
+    flag_to_spec = {}
+    for spec in PARAMETERS:
+        for flag in spec.flags:
+            flag_to_spec[flag] = spec
+        if spec.action == argparse.BooleanOptionalAction:
+            for flag in spec.flags:
+                if flag.startswith("--"):
+                    flag_to_spec["--no-" + flag[2:]] = spec
 
-    for token in argv:
-        if fill_selector_script :
-            selector_script = token
-            fill_selector_script = False
-        elif token == "--show":
-            fill_selector_script = True
+    i = 0
+    n = len(argv)
+    selector_script: Optional[str] = None
+
+    while i < n:
+        token = argv[i]
+        if token == "--show":
+            if i + 1 >= n or argv[i + 1] in ("--as-parameters", "--as-environment", "--as-natural", "--show"):
+                sys.stderr.write("Syntax error: --show requires a selector script argument\n")
+                sys.exit(1)
+            selector_script = argv[i + 1]
+            i += 2
         elif token in ("--as-parameters", "--as-environment", "--as-natural"):
             mode = token[5:]  # 'parameters', 'environment', or 'natural'
             _output_inspection_group(
@@ -596,6 +614,36 @@ def process_inspection_flags(
                 cli_explicit=cli_explicit,
             )
             selector_script = None
+            i += 1
+        elif token in flag_to_spec:
+            spec = flag_to_spec[token]
+            if spec.action in ("store_true", "store_false") or spec.action == argparse.BooleanOptionalAction or spec.action == "count":
+                i += 1
+            elif spec.action == "append":
+                if i + 1 < n and not argv[i + 1].startswith("-"):
+                    i += 2
+                else:
+                    i += 1
+            elif spec.nargs == 2:
+                if i + 2 < n:
+                    i += 3
+                else:
+                    i += 1
+            else:
+                if i + 1 < n and not argv[i + 1].startswith("-"):
+                    i += 2
+                else:
+                    i += 1
+        elif token.startswith("-"):
+            if "=" in token:
+                key, _, _ = token.partition("=")
+                if key in flag_to_spec:
+                    i += 1
+                    continue
+            sys.stderr.write(f"Unknown inspection flag or option: '{token}'\n")
+            sys.exit(1)
+        else:
+            i += 1
 
     return True
 
@@ -613,34 +661,39 @@ def _output_inspection_group(
         if spec.name == "version" or spec.is_inspection:
             continue
 
-        attributes=set()
+        attributes = set()
 
         # Evaluate tiers
         val_param = cli_explicit.get(spec.name)
         has_param = spec.name in cli_explicit
-        if has_param : attributes.add( "has_arg")
-        if val_param : attributes.add( "has_arg_set")
+        attributes.add("has_arg")
+        if has_param:
+            attributes.add("has_arg_set")
 
         val_env = None
         has_env = False
         if spec.env_var and spec.env_var in initial_env:
             has_env = True
             val_env = initial_env[spec.env_var]
-        if spec.env_var : attributes.add( "has_env")
-        if spec.env_var in initial_env : attributes.add( "has_env_set")
+        if spec.env_var:
+            attributes.add("has_env")
+        if has_env:
+            attributes.add("has_env_set")
 
         val_config = None
         has_config = False
         if spec.env_var and spec.env_var in config_dict:
             has_config = True
             val_config = config_dict[spec.env_var]
-        if spec.env_var : attributes.add( "has_conf")
-        if spec.env_var in config_dict : attributes.add( "has_conf_set")
+        if spec.env_var:
+            attributes.add("has_conf")
+        if has_config:
+            attributes.add("has_conf_set")
 
         val_default = spec.default
         has_default = val_default is not None or spec.action in ("store_true", argparse.BooleanOptionalAction)
-        if has_default : attributes.add( "has_def")
-        if val_default in config_dict : attributes.add( "has_def_set")
+        if has_default:
+            attributes.add("has_def")
 
         # Determine winning value and tier
         winning_tier = None

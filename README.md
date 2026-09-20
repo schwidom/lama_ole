@@ -655,14 +655,7 @@ to generate when you pressed Ctrl-C.
 | `--system_prompt_file PATH` | Read system prompt from a file | |
 | `--no_safety_system_prompt` | Disable safety system prompt; enables potential takeover when tools are used (placed after any user-provided system prompt) | |
 | `--debug` | Initialize the environment and enter an interactive Python REPL for debugging | |
-| `--show-config` | Include values that originate from the config files (`lama_ole.env`) | |
-| `--show-nonconfig` | Exclude values that originate from the config files | |
-| `--show-environment` | Include values that originate from shell environment variables | |
-| `--show-nonenvironment` | Exclude values that originate from shell environment variables | |
-| `--show-parameters` | Include values set explicitly on the command line | |
-| `--show-nonparameters` | Exclude values set explicitly on the command line | |
-| `--show-defaults` | Include values that come from the built-in defaults | |
-| `--show-nondefaults` | Show only values that differ from the built-in defaults | |
+| `--show SCRIPT` | Selector script expression for parameter filtering (e.g., `def`, `conf`, `env`, `arg`, `s env`, `! def`, `(and def conf)`) | |
 | `--as-parameters` | Print the selected values as CLI flags and exit | |
 | `--as-environment` | Print the selected values as shell `export` statements and exit | |
 | `--as-natural` | Print the selected values in their natural representation and exit | |
@@ -685,34 +678,43 @@ to generate when you pressed Ctrl-C.
 ### Parameter Inspection
 
 `lama_ole.py` can print its effective configuration instead of running. The
-`--as-...` flags select the output **format**, the `--show-...` flags select
-which value **tiers** are included:
+`--as-...` flags select the output **format**, and the `--show SCRIPT` flag expects
+a selector script in a Lisp-like (LI) interpreter language to filter which parameters are shown.
 
-| Tier | Source | Select |
-| :--- | :--- | :--- |
-| Config | `./lama_ole.env` / `~/.config/lama_ole/lama_ole.env` | `--show-config` / `--show-nonconfig` |
-| Environment | shell env vars (`LAMA_OLE_*`) | `--show-environment` / `--show-nonenvironment` |
-| Parameters | values set on the command line | `--show-parameters` / `--show-nonparameters` |
-| Defaults | built-in defaults | `--show-defaults` / `--show-nondefaults` |
+#### Selector Script Syntax:
 
-- If no `--show-*` selector is given, all tiers are included.
-- `--show-nondefaults` keeps only values that differ from the built-in default.
-- Each `--as-...` flag "releases" the selectors seen so far, prints the
-  matching group, then resets the selector set — so several groups can be
-  produced in one run by repeating `--show-... --as-...` pairs.
-- The program prints the result and exits with code 0 without contacting Ollama.
+1. **Source Tokens**:
+   - `def` — Selects parameters that have a built-in default value defined.
+   - `conf` — Selects parameters that allow a configuration file value.
+   - `env` — Selects parameters that allow a shell environment variable.
+   - `arg` — Selects parameters that allow a command line argument.
 
-Tier precedence is `parameters > environment > config > defaults`. When a
-stronger tier overrides a weaker one, the printed line carries a comment:
+2. **Value Requirements (`s`)**:
+   - Prepend any source with `s` (e.g., `s env`, `s conf`, `s arg`) to require that the source is not only allowed but also has a value explicitly set.
+   - For `def`, since a default value is automatically set when defined, `s def` behaves the same as `def`.
+
+3. **Inversion (`!`)**:
+   - Prepend any expression with `!` to invert its truth value (e.g., `! def` selects parameters that do NOT have a default value defined).
+
+4. **Grouping & Logical Operators**:
+   - Use parentheses to group expressions.
+   - `(and expr1 expr2 ...)` returns True only if all expressions are True. Empty `and` returns True.
+   - `(or expr1 expr2 ...)` returns True if at least one expression is True. Empty `or` returns False.
+
+- If no `--show` selector is given, all parameters are included by default.
+- Each `--as-...` flag "releases" the selectors seen so far, prints the matching group, then resets the selector script — so several groups can be produced in one run by repeating `--show ... --as-...` pairs.
+- The program prints the result and exits with code 0 without contacting any LLM backends.
+
+Tier precedence is `parameters > environment > config > defaults`. When a stronger tier overrides a weaker one, the printed line carries a comment:
 
 ```bash
-python3 lama_ole.py --show-parameters --as-parameters --model gemma2:2b
+python3 lama_ole.py --show "arg" --as-parameters --model gemma2:2b
 # --model gemma2:2b
 ```
 
 ```bash
 # shell has LAMA_OLE_MODEL=mistral, lama_ole.env has LAMA_OLE_MODEL=qwen2.5
-python3 lama_ole.py --show-parameters --as-parameters --model gemma2:2b
+python3 lama_ole.py --show "arg" --as-parameters --model gemma2:2b
 # --model gemma2:2b # (overrides environment: "mistral", config: "qwen2.5")
 ```
 
@@ -721,7 +723,7 @@ The three output formats:
 - **`--as-parameters`** — valid CLI flags:
 
   ```bash
-  python3 lama_ole.py --show-parameters --as-parameters --model gemma2:2b \
+  python3 lama_ole.py --show "arg" --as-parameters --model gemma2:2b \
       --temperature 0.7
   # --model gemma2:2b
   # --temperature 0.7
@@ -730,16 +732,15 @@ The three output formats:
 - **`--as-environment`** — `export` statements:
 
   ```bash
-  LAMA_OLE_NUM_CTX=32768 python3 lama_ole.py --show-environment --as-environment
+  LAMA_OLE_NUM_CTX=32768 python3 lama_ole.py --show "s env" --as-environment
   # export LAMA_OLE_NUM_CTX=32768
   ```
 
-- **`--as-natural`** — parameter values as CLI flags, environment/config values
-  as `NAME=value` pairs:
+- **`--as-natural`** — parameter values as CLI flags, environment/config values as `NAME=value` pairs:
 
   ```bash
-  LAMA_OLE_NUM_CTX=32768 python3 lama_ole.py --show-environment \
-      --show-parameters --as-natural --model gemma2:2b
+  LAMA_OLE_NUM_CTX=32768 python3 lama_ole.py --show "(or s env s arg)" \
+      --as-natural --model gemma2:2b
   # --model gemma2:2b
   # LAMA_OLE_NUM_CTX=32768
   ```
@@ -747,8 +748,8 @@ The three output formats:
 Multiple groups in one run (each `--as-...` starts a new block):
 
 ```bash
-LAMA_OLE_NUM_CTX=32768 python3 lama_ole.py --show-environment --as-environment \
-    --show-parameters --as-parameters --model gemma2:2b
+LAMA_OLE_NUM_CTX=32768 python3 lama_ole.py --show "s env" --as-environment \
+    --show "s arg" --as-parameters --model gemma2:2b
 # export LAMA_OLE_NUM_CTX=32768
 # --model gemma2:2b
 ```
