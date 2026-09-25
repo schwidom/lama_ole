@@ -15,6 +15,7 @@ if lama_ole_dir not in sys.path:
     sys.path.insert(0, lama_ole_dir)
 
 import chat  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 
 
 class _FakeClient:
@@ -26,7 +27,9 @@ class _FakeClient:
 
 
 def _state(model="test:model", **kwargs):
-    st = chat.ChatState(client=_FakeClient(), model=model, color="never")
+    st = chat.ChatState(
+        config=RunConfig(client=_FakeClient(), model=model, color="never")
+    )
     for key, value in kwargs.items():
         setattr(st, key, value)
     return st
@@ -126,7 +129,7 @@ class TestAccumulation:
     def test_accumulate_separates_models(self):
         st = _state(model="a")
         chat._accumulate_stats(st, _metrics())
-        st.model = "b"
+        st.config.model = "b"
         chat._accumulate_stats(st, _metrics())
         assert st.stats_by_model["a"]["rounds"] == 2
         assert st.stats_by_model["b"]["rounds"] == 2
@@ -181,7 +184,7 @@ class TestCmdStats:
         st.ctx_usage = _metrics()
         st.ctx_usage_model = "test:model"
         chat._accumulate_stats(st, st.ctx_usage)
-        st.model = "other:model"
+        st.config.model = "other:model"
         st.stats_by_model.setdefault(
             "other:model",
             {"rounds": 1, "eval_count": 100, "eval_duration_ns": 2_000_000_000,
@@ -211,14 +214,14 @@ class TestPersistence:
         st = _state()
         st.ctx_usage = _metrics()
         chat._accumulate_stats(st, st.ctx_usage)
-        st.model = "different:model"
+        st.config.model = "different:model"
         data = chat.serialize_session(st)
         assert data["model"] == "different:model"
         assert data["stats"]["model"] == "test:model"
 
         st2 = _state()
         chat.apply_session(st2, data, source="test")
-        assert st2.model == "different:model"
+        assert st2.config.model == "different:model"
         assert st2.stats_by_model["test:model"]["rounds"] == 2
         assert "rounds" not in (st2.ctx_usage or {})
 

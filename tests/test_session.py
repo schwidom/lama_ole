@@ -25,6 +25,7 @@ if lama_ole_dir not in sys.path:
     sys.path.insert(0, lama_ole_dir)
 
 import chat  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 
 
 def _load_cli_module():
@@ -39,10 +40,29 @@ def _load_cli_module():
 CLI = _load_cli_module()
 
 
+_CONFIG_FIELDS = (
+    "show_thinking",
+    "verbose",
+    "system_prompt",
+    "skill_text",
+    "no_safety_system_prompt",
+    "color",
+    "mode",
+    "options",
+    "safe",
+)
+
+
 def _make_state(**kwargs):
-    kwargs.setdefault("client", None)
-    kwargs.setdefault("model", "m")
-    return chat.ChatState(**kwargs)
+    client = kwargs.pop("client", None)
+    model = kwargs.pop("model", "m")
+    config_kwargs = {}
+    for key in _CONFIG_FIELDS:
+        if key in kwargs:
+            config_kwargs[key] = kwargs.pop(key)
+    return chat.ChatState(
+        config=RunConfig(client=client, model=model, **config_kwargs), **kwargs
+    )
 
 
 class SessionSerializeTest(unittest.TestCase):
@@ -183,16 +203,16 @@ class SessionSerializeTest(unittest.TestCase):
         state = _make_state()
         state.messages = [{"role": "system", "content": "S"}, {"role": "user", "content": "hi"}]
         state.skill = "code-reviewer"
-        state.skill_text = "Review."
-        state.system_prompt = "SP"
+        state.config.skill_text = "Review."
+        state.config.system_prompt = "SP"
         data = chat.serialize_session(state, session_id="abc", cwd="/x", created_at=1.0)
 
         state2 = _make_state(model="other")
         chat.apply_session(state2, data)
-        self.assertEqual(state2.model, "m")
+        self.assertEqual(state2.config.model, "m")
         self.assertEqual(state2.skill, "code-reviewer")
-        self.assertEqual(state2.skill_text, "Review.")
-        self.assertEqual(state2.system_prompt, "SP")
+        self.assertEqual(state2.config.skill_text, "Review.")
+        self.assertEqual(state2.config.system_prompt, "SP")
         self.assertEqual(state2.session_id, "abc")
         self.assertEqual(state2.session_created_at, 1.0)
         self.assertEqual(state2.messages, state.messages)

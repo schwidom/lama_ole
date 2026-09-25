@@ -19,6 +19,7 @@ if lama_ole_dir not in sys.path:
 
 from backends.base import ChatChunk  # noqa: E402
 from tool_base import run_with_tools  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 from tool_base.engine import (  # noqa: E402
     _brace_balanced,
     _clean_stream_text,
@@ -253,12 +254,10 @@ class StreamClient:
 
 
 def _run_kwargs(client, messages, loaded_tools=(), **extra):
-    kwargs = dict(
+    mode = extra.pop("mode", None)
+    config_kwargs = dict(
         client=client,
         model="test",
-        messages=messages,
-        loaded_tools=list(loaded_tools),
-        backend_tools=None,
         options={},
         keep_alive=None,
         show_thinking=True,
@@ -266,7 +265,16 @@ def _run_kwargs(client, messages, loaded_tools=(), **extra):
         system_prompt=None,
         skill_text=None,
         color="never",
+        mode=mode,
+    )
+    if "verbose" in extra:
+        config_kwargs["verbose"] = extra.pop("verbose")
+    kwargs = dict(
+        messages=messages,
+        loaded_tools=list(loaded_tools),
+        backend_tools=None,
         state_manager=StateManager(),
+        config=RunConfig(**config_kwargs),
     )
     kwargs.update(extra)
     return kwargs

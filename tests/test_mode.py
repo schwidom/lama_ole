@@ -17,13 +17,20 @@ if lama_ole_dir not in sys.path:
 
 import chat  # noqa: E402
 from tool_base import compose_system_prompt, load_tools  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 from backends.echo_backend import EchoMockBackend  # noqa: E402
 
 
 def _make_state(**kwargs):
     kwargs.setdefault("client", EchoMockBackend())
     kwargs.setdefault("model", "m")
-    return chat.ChatState(**kwargs)
+    return chat.ChatState(
+        config=RunConfig(
+            client=kwargs.pop("client"),
+            model=kwargs.pop("model"),
+            mode=kwargs.pop("mode", "build"),
+        )
+    )
 
 
 def _tool_names(state):
@@ -57,7 +64,7 @@ def _system_content(state):
 
 
 def test_default_mode_is_build():
-    assert _make_state().mode == "build"
+    assert _make_state().config.mode == "build"
 
 
 def test_compose_system_prompt_plan_contains_block():
@@ -83,7 +90,7 @@ def test_handle_plan_switches_mode_and_prompt(capsys):
     st = _make_state()
     st.messages = [{"role": "user", "content": "hi"}]
     chat._handle_command("/plan", st)
-    assert st.mode == "plan"
+    assert st.config.mode == "plan"
     assert "[PLAN MODE BEGIN]" in _system_content(st)
     assert "Switched to plan mode." in capsys.readouterr().out
 
@@ -93,7 +100,7 @@ def test_handle_build_removes_plan_block(capsys):
     st.messages = [{"role": "user", "content": "hi"}]
     chat._handle_command("/plan", st)
     chat._handle_command("/build", st)
-    assert st.mode == "build"
+    assert st.config.mode == "build"
     assert "[PLAN MODE BEGIN]" not in _system_content(st)
 
 
@@ -127,7 +134,7 @@ def test_plan_mode_keeps_write_only_tools_advertised():
 def test_mode_label():
     st = _make_state()
     assert chat._mode_label(st, use_color=False) == "[build] "
-    st.mode = "plan"
+    st.config.mode = "plan"
     assert chat._mode_label(st, use_color=False) == "[plan] "
     assert chat._mode_label(st, use_color=True) != "[plan] "
     assert chat._mode_label(st, use_color=True) != "[build] "
@@ -145,7 +152,7 @@ def test_completion_plan_build():
 
 def test_mode_serialized_when_plan():
     st = _make_state()
-    st.mode = "plan"
+    st.config.mode = "plan"
     data = chat.serialize_session(st)
     assert data["mode"] == "plan"
 
@@ -158,25 +165,25 @@ def test_mode_not_serialized_when_build():
 def test_apply_session_restores_mode():
     st2 = _make_state()
     chat.apply_session(st2, {"mode": "plan"})
-    assert st2.mode == "plan"
+    assert st2.config.mode == "plan"
 
 
 def test_apply_session_ignores_invalid_mode():
     st = _make_state()
     chat.apply_session(st, {"mode": "bogus"})
-    assert st.mode == "build"
+    assert st.config.mode == "build"
 
 
 def test_resume_plan_session_keeps_all_tools():
     st = _state_with_tools(["tools.example_tools", "tools.edit"])
-    st.mode = "plan"
+    st.config.mode = "plan"
     st.messages = [{"role": "user", "content": "hi"}]
     st.apply_skill()
     data = chat.serialize_session(st)
 
     st2 = _make_state()
     chat.apply_session(st2, data)
-    assert st2.mode == "plan"
+    assert st2.config.mode == "plan"
     names = _tool_names(st2)
     assert "read_file" in names
     assert "edit" in names
@@ -191,5 +198,5 @@ def test_switch_round_trip_preserves_mode():
     st2 = _make_state()
     chat.apply_session(st2, data)
     chat._handle_command("/build", st2)
-    assert st2.mode == "build"
+    assert st2.config.mode == "build"
     assert "[PLAN MODE BEGIN]" not in _system_content(st2)

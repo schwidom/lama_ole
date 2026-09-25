@@ -17,6 +17,7 @@ if lama_ole_dir not in sys.path:
     sys.path.insert(0, lama_ole_dir)
 
 import chat  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 
 SAMPLE = [
     {"role": "system", "content": "sys"},
@@ -36,7 +37,10 @@ SAMPLE = [
 
 
 def _state(messages=SAMPLE):
-    return chat.ChatState(client=None, model="test", messages=list(messages))
+    return chat.ChatState(
+        config=RunConfig(client=None, model="test"),
+        messages=list(messages),
+    )
 
 
 def _history_lines(arg, messages=SAMPLE):
@@ -171,18 +175,20 @@ def test_run_with_tools_stamps_messages():
 
     messages = [{"role": "user", "content": "hi"}]
     run_with_tools(
-        client=FakeClient(iter([chunk("calculate", {"expression": "2+2"})])),
-        model="m",
         messages=messages,
         loaded_tools=[],
         backend_tools=None,
-        options={},
-        keep_alive=None,
-        show_thinking=False,
-        no_safety_system_prompt=True,
-        system_prompt=None,
-        skill_text=None,
-        color="never",
+        config=RunConfig(
+            client=FakeClient(iter([chunk("calculate", {"expression": "2+2"})])),
+            model="m",
+            options={},
+            keep_alive=None,
+            show_thinking=False,
+            no_safety_system_prompt=True,
+            system_prompt=None,
+            skill_text=None,
+            color="never",
+        ),
     )
     assert [m["role"] for m in messages] == [
         "system",

@@ -2,24 +2,28 @@ import unittest
 import json
 import io
 from unittest.mock import MagicMock
+from tool_base.config import RunConfig
 from tool_base.engine import run_with_tools
 from backends.base import ChatChunk
 
 class TestNDJSONLogging(unittest.TestCase):
     def setUp(self):
         self.client = MagicMock()
+        self.ndjson_handle = io.StringIO()
         # Setup common parameters for run_with_tools to avoid errors
         self.params = {
-            "client": self.client,
-            "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
             "loaded_tools": [],
             "backend_tools": None,
-            "options": {},
-            "keep_alive": True,
-            "show_thinking": False,
-            "no_safety_system_prompt": True,
-            "ndjson_log_file_handle": io.StringIO(),
+            "config": RunConfig(
+                client=self.client,
+                model="test-model",
+                options={},
+                keep_alive=True,
+                show_thinking=False,
+                no_safety_system_prompt=True,
+                ndjson_log_file_handle=self.ndjson_handle,
+            ),
         }
 
     def test_split_thinking_and_output(self):
@@ -34,7 +38,7 @@ class TestNDJSONLogging(unittest.TestCase):
         run_with_tools(**self.params)
 
         # 3. Verify Logs
-        log_output = self.params["ndjson_log_file_handle"].getvalue().strip()
+        log_output = self.ndjson_handle.getvalue().strip()
         lines = log_output.split('\n')
         
         # We expect at least two lines (one for thinking, one for output)
@@ -66,7 +70,7 @@ class TestNDJSONLogging(unittest.TestCase):
         run_with_tools(**self.params)
 
         # 3. Verify Logs
-        log_output = self.params["ndjson_log_file_handle"].getvalue().strip()
+        log_output = self.ndjson_handle.getvalue().strip()
         lines = log_output.split('\n')
         
         assistant_msgs = []

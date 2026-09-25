@@ -14,6 +14,7 @@ if lama_ole_dir not in sys.path:
     sys.path.insert(0, lama_ole_dir)
 
 import chat  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 from tool_base.compaction import (  # noqa: E402
     COMPACTION_SYSTEM_PROMPT,
     DEFAULT_CTX_COMPACT_THRESHOLD,
@@ -242,7 +243,9 @@ def test_apply_compaction_empty_summary_fallback():
 
 
 def _state(client=None, **kwargs):
-    st = chat.ChatState(client=client, model=kwargs.pop("model", "test:model"))
+    st = chat.ChatState(
+        config=RunConfig(client=client, model=kwargs.pop("model", "test:model"))
+    )
     for key, value in kwargs.items():
         setattr(st, key, value)
     return st
@@ -435,7 +438,7 @@ def test_model_switch_marks_estimated(capsys):
     st.ctx_usage = {"prompt_eval_count": 5000, "eval_count": 200}
     st.ctx_usage_model = "m"
     chat._handle_command("/model other", st)
-    assert st.model == "other"
+    assert st.config.model == "other"
     assert st.ctx_usage["_estimated"] is True
     assert st.ctx_usage_model == "other"
     assert "~" in chat._ctx_prompt_gauge(st, use_color=False)

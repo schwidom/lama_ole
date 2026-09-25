@@ -16,6 +16,7 @@ if lama_ole_dir not in sys.path:
 import chat  # noqa: E402
 import color_util  # noqa: E402
 from backends.base import ModelInfo, RunningModel  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 
 
 class _FakeClient:
@@ -34,7 +35,15 @@ class _FakeClient:
 
 def _state(client=None, **kwargs):
     opts = kwargs.pop("options", {})
-    st = chat.ChatState(client=client, model=kwargs.pop("model", "test:model"), options=opts)
+    system_prompt = kwargs.pop("system_prompt", None)
+    st = chat.ChatState(
+        config=RunConfig(
+            client=client,
+            model=kwargs.pop("model", "test:model"),
+            options=opts,
+            system_prompt=system_prompt,
+        )
+    )
     for key, value in kwargs.items():
         setattr(st, key, value)
     return st

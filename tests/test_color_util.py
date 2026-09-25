@@ -11,6 +11,7 @@ if lama_ole_dir not in sys.path:
 import color_util  # noqa: E402
 
 import chat  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 
 
 class TestColorModeEnabled:
@@ -66,24 +67,30 @@ class TestRunChatPromptColoring:
         return captured["prompt"]
 
     def test_never_gives_plain_prompt(self, monkeypatch):
-        state = chat.ChatState(client=None, model="m", color="never", ctx_meter=False)
+        state = chat.ChatState(
+            config=RunConfig(client=None, model="m", color="never"),
+            ctx_meter=False,
+        )
         prompt = self._capture_prompt(monkeypatch, state)
         assert prompt == "[build] >>> "
         assert "\x1b[" not in prompt
 
     def test_none_gives_plain_prompt(self, monkeypatch):
-        state = chat.ChatState(client=None, model="m", color="none", ctx_meter=False)
+        state = chat.ChatState(
+            config=RunConfig(client=None, model="m", color="none"),
+            ctx_meter=False,
+        )
         prompt = self._capture_prompt(monkeypatch, state)
         assert prompt == "[build] >>> "
         assert "\x1b[" not in prompt
 
     def test_always_gives_colored_prompt(self, monkeypatch):
-        state = chat.ChatState(client=None, model="m", color="always")
+        state = chat.ChatState(config=RunConfig(client=None, model="m", color="always"))
         prompt = self._capture_prompt(monkeypatch, state)
         assert "\x1b[" in prompt
 
     def test_always_prompt_ends_with_input_color(self, monkeypatch):
-        state = chat.ChatState(client=None, model="m", color="always")
+        state = chat.ChatState(config=RunConfig(client=None, model="m", color="always"))
         prompt = self._capture_prompt(monkeypatch, state)
         assert prompt.endswith(color_util.C_INPUT)
         assert color_util.colored(">>> ", color_util.C_PROMPT, True) in prompt
@@ -183,7 +190,7 @@ class TestRunChatConfiguredColor:
 
         monkeypatch.setattr("builtins.input", fake_input)
         color_util.configure(prompt="green")
-        state = chat.ChatState(client=None, model="m", color="always")
+        state = chat.ChatState(config=RunConfig(client=None, model="m", color="always"))
         chat.run_chat(state)
         assert "\x1b[32m" in captured["prompt"]
 

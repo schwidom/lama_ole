@@ -16,6 +16,7 @@ except ImportError:
 
 from tool_base import (
     Tool,
+    RunConfig,
     run_with_tools,
     StateManager,
     ExecutionState,
@@ -49,8 +50,7 @@ from backends.registry import SUPPORTED_BACKENDS
 
 @dataclass
 class ChatState:
-    client: object
-    model: str
+    config: 'RunConfig'
     backend_name: str = "ollama"
     host: str = None
     api_key: str = None
@@ -59,30 +59,9 @@ class ChatState:
     loaded_tool_modules: list = field(default_factory=list)
     backend_tools: object = None
     last_used_model_by_backend: dict = field(default_factory=dict)
-    _warned_no_thinking_models: set = field(default_factory=set)
-    options: dict = field(default_factory=dict)
-    keep_alive: object = None
-    show_thinking: bool = False
-    no_safety_system_prompt: bool = False
-    system_prompt: str = None
-    skill_text: str = None
     skill: str = None
     skills_dir: str = None
     tools_dir: str = None
-    verbose: int = 0
-    safe: bool = False
-    mode: str = "build"
-    show_diff: bool = True
-    thought_file_handle: object = None
-    output_file_handle: object = None
-    toolcall_file_handle: object = None
-    chatinput_file_handle: object = None
-    max_tool_rounds: int = None
-    max_tool_rounds_continuation: str = "ask"
-    websearch: bool = False
-    ndjson_log_path: str = None
-    ndjson_log_file_handle: object = None
-    color: object = "auto"
     state_manager: StateManager = field(default_factory=StateManager)
     sessions_dir: str = None
     session_id: str = None
@@ -97,29 +76,40 @@ class ChatState:
     ctx_compact_threshold: float = DEFAULT_CTX_COMPACT_THRESHOLD
     ctx_compact_model: str = None
     stats_by_model: dict = field(default_factory=dict)
+    ndjson_log_path: str = None
     _hotkey_listener: object = None
     _last_cut_messages: list = field(default_factory=list)
     _last_cut_indices: list = None  # message indices removed by the last /cut
 
     def __post_init__(self):
-        if self.ndjson_log_path and self.ndjson_log_file_handle is None:
-            self.ndjson_log_file_handle = open(
+        from tool_base.config import RunConfig
+        if not isinstance(self.config, RunConfig):
+            raise TypeError(
+                "ChatState requires a RunConfig object as 'config'; "
+                f"got {type(self.config).__name__}"
+            )
+        if self.ndjson_log_path and self.config.ndjson_log_file_handle is None:
+            self.config.ndjson_log_file_handle = open(
                 self.ndjson_log_path, "w", encoding="utf-8"
             )
+        if self.config.hotkey_pause is None:
+            self.config.hotkey_pause = self.hotkey_pause
+        if self.config.hotkey_resume is None:
+            self.config.hotkey_resume = self.hotkey_resume
 
     def log_ndjson(self, message=None):
-        if not self.ndjson_log_file_handle:
+        if not self.config.ndjson_log_file_handle:
             return
         try:
             data = {
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "model": self.model,
+                "model": self.config.model,
                 "message": message,
             }
-            self.ndjson_log_file_handle.write(
+            self.config.ndjson_log_file_handle.write(
                 json.dumps(data, ensure_ascii=False) + "\n"
             )
-            self.ndjson_log_file_handle.flush()
+            self.config.ndjson_log_file_handle.flush()
         except Exception as e:
             print(f"Error writing ndjson log: {e}", file=sys.stderr)
 
@@ -134,9 +124,9 @@ class ChatState:
             msg["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
     def close(self):
-        if self.ndjson_log_file_handle is not None:
-            self.ndjson_log_file_handle.close()
-            self.ndjson_log_file_handle = None
+        if self.config is not None and self.config.ndjson_log_file_handle is not None:
+            self.config.ndjson_log_file_handle.close()
+            self.config.ndjson_log_file_handle = None
 
     def apply_skill(self) -> None:
         """Rewrite the system message in state.messages from skill_text.
@@ -148,10 +138,10 @@ class ChatState:
         from tool_base import compose_system_prompt
 
         new_content = compose_system_prompt(
-            system_prompt=self.system_prompt,
-            skill_text=self.skill_text,
-            no_safety_system_prompt=self.no_safety_system_prompt,
-            mode=self.mode,
+            system_prompt=self.config.system_prompt,
+            skill_text=self.config.skill_text,
+            no_safety_system_prompt=self.config.no_safety_system_prompt,
+            mode=self.config.mode,
         )
         for i, m in enumerate(self.messages):
             if m.get("role") == "system":
@@ -168,7 +158,7 @@ class ChatState:
         (see the engine's plan-mode gate), so the model always knows which
         tools exist and will work once build mode is active.
         """
-        convert = getattr(self.client, "convert_tools", None)
+        convert = getattr(self.config.client, "convert_tools", None)
         if self.loaded_tools and callable(convert):
             self.backend_tools = convert(self.loaded_tools)
         else:
@@ -222,7 +212,7 @@ class ChatState:
 
     def toggle_mode(self) -> None:
         """Flip plan/build mode. Safe to call from the hotkey thread."""
-        target = "plan" if self.mode == "build" else "build"
+        target = "plan" if self.config.mode == "build" else "build"
         _set_mode(self, target, autosave=False)
 
     def start_hotkey_listener(self) -> None:
@@ -273,10 +263,10 @@ def _set_mode(state: ChatState, mode: str, autosave: bool = True) -> None:
     if mode not in _MODES:
         print("Mode must be one of: build, plan")
         return
-    if state.mode == mode:
+    if state.config.mode == mode:
         print(f"Already in {mode} mode.")
         return
-    state.mode = mode
+    state.config.mode = mode
     state.apply_skill()
     _bind_mode_toggle(state)
     if autosave:
@@ -286,7 +276,7 @@ def _set_mode(state: ChatState, mode: str, autosave: bool = True) -> None:
 
 def _mode_label(state: ChatState, use_color: bool) -> str:
     """Prompt prefix indicating the active mode ('[build] ' / '[plan] ')."""
-    if state.mode == "plan":
+    if state.config.mode == "plan":
         return color_util.colored("[plan] ", color_util.C_METER_MID, use_color)
     return color_util.colored("[build] ", color_util.C_METER_LOW, use_color)
 
@@ -301,7 +291,7 @@ def _bind_mode_toggle(state: ChatState) -> None:
     """
     if readline is None:
         return
-    target = "/plan" if state.mode == "build" else "/build"
+    target = "/plan" if state.config.mode == "build" else "/build"
     try:
         if "libedit" in (readline.__doc__ or ""):
             readline.parse_and_bind(f'bind -s "^[[Z" "{target}"')
@@ -495,7 +485,7 @@ _METER_COLOR_GLOBALS = {
 
 
 def _ensure_ctx_max(state: ChatState) -> None:
-    """Resolve the effective context window for ``state.model`` once.
+    """Resolve the effective context window for ``config.model`` once.
 
     Order: explicit --num_ctx option -> LAMA_OLE_CTX_SIZE override -> the
     running model's allocated context (client.ps) -> the model's num_ctx
@@ -509,7 +499,7 @@ def _ensure_ctx_max(state: ChatState) -> None:
 
 
 def _resolve_ctx_max(state: ChatState):
-    num_ctx = (state.options or {}).get("num_ctx")
+    num_ctx = (state.config.options or {}).get("num_ctx")
     if num_ctx:
         return int(num_ctx)
 
@@ -521,17 +511,17 @@ def _resolve_ctx_max(state: ChatState):
             pass
 
     try:
-        running = state.client.list_running()
+        running = state.config.client.list_running()
         for m in running or []:
             name = getattr(m, "name", None)
             cl = getattr(m, "context_length", None)
-            if name == state.model and cl:
+            if name == state.config.model and cl:
                 return int(cl)
     except Exception:
         pass
 
     try:
-        info = state.client.show_model(state.model)
+        info = state.config.client.show_model(state.config.model)
         if info is not None:
             if info.context_length:
                 return int(info.context_length)
@@ -632,7 +622,7 @@ def _accumulate_stats(state: ChatState, metrics: dict) -> None:
     if not metrics or not metrics.get("turn_rounds"):
         return
     entry = state.stats_by_model.setdefault(
-        state.model,
+        state.config.model,
         {
             "rounds": 0,
             "eval_count": 0,
@@ -699,13 +689,13 @@ def _fmt_delta(pct: float, use_color: bool) -> str:
 
 def _cmd_stats(state: ChatState) -> None:
     """Show the current model, last turn's per-round breakdown, and session averages."""
-    use_color = color_util.color_mode_enabled(state.color)
+    use_color = color_util.color_mode_enabled(state.config.color)
     dim = lambda s: color_util.colored(s, color_util.C_THINK, use_color)
     cyan = lambda s: color_util.colored(s, color_util.C_INPUT, use_color)
 
     usage = state.ctx_usage
 
-    model_line = f"{dim('Model:'):<14} {cyan(state.model)}"
+    model_line = f"{dim('Model:'):<14} {cyan(state.config.model)}"
     if usage and usage.get("prompt_eval_count"):
         _ensure_ctx_max(state)
         used = _ctx_usage_total(usage)
@@ -724,13 +714,13 @@ def _cmd_stats(state: ChatState) -> None:
     avg_speed = _toks_per_sec(total["eval_count"], total["eval_duration_ns"])
 
     rounds = usage.get("rounds") or []
-    rounds_model = usage.get("rounds_model") or state.model
+    rounds_model = usage.get("rounds_model") or state.config.model
     if rounds:
         turn_tokens = sum(r.get("eval_count") or 0 for r in rounds)
         turn_time = sum(r.get("eval_duration_ns") or 0 for r in rounds)
         turn_speed = _toks_per_sec(turn_tokens, turn_time)
         turn_label = "1 round" if len(rounds) == 1 else f"{len(rounds)} rounds"
-        model_tag = "" if rounds_model == state.model else f" ({rounds_model})"
+        model_tag = "" if rounds_model == state.config.model else f" ({rounds_model})"
         print()
         print(
             f"{dim('Last turn'):<10}{model_tag}: {dim(turn_label)}"
@@ -765,7 +755,7 @@ def _cmd_stats(state: ChatState) -> None:
         for name, m in per_model:
             speed = _toks_per_sec(m.get("eval_count"), m.get("eval_duration_ns"))
             row = f"  {name}   {_fmt_speed(speed)} · {m.get('rounds', 0)} rounds"
-            if name == state.model:
+            if name == state.config.model:
                 row = color_util.colored(row, color_util.C_INPUT, use_color)
             print(row)
 
@@ -787,10 +777,10 @@ def _estimate_context_tokens(state: ChatState) -> int:
             has_system = True
     if not has_system:
         sp = compose_system_prompt(
-            system_prompt=state.system_prompt,
-            skill_text=state.skill_text,
-            no_safety_system_prompt=state.no_safety_system_prompt,
-            mode=state.mode,
+            system_prompt=state.config.system_prompt,
+            skill_text=state.config.skill_text,
+            no_safety_system_prompt=state.config.no_safety_system_prompt,
+            mode=state.config.mode,
         )
         total_chars += len(sp)
     return max(1, total_chars // 4)
@@ -900,7 +890,7 @@ def run_compaction(state: ChatState, confirm: bool = True) -> bool:
     """
     state.hotkey_pause()
     try:
-        use_color = color_util.color_mode_enabled(state.color)
+        use_color = color_util.color_mode_enabled(state.config.color)
         _ensure_ctx_max(state)
         system_messages = [m for m in state.messages if m.get("role") == "system"]
         non_sys = [m for m in state.messages if m.get("role") != "system"]
@@ -945,23 +935,23 @@ def run_compaction(state: ChatState, confirm: bool = True) -> bool:
                 print("Compaction cancelled.", file=sys.stderr)
                 return False
 
-        model = state.ctx_compact_model or state.model
+        model = state.ctx_compact_model or state.config.model
         output_logger = (
-            StateLogger(handle=state.output_file_handle)
-            if state.output_file_handle
+            StateLogger(handle=state.config.output_file_handle)
+            if state.config.output_file_handle
             else None
         )
         summary_parts = []
         try:
-            stream = state.client.chat(
+            stream = state.config.client.chat(
                 model=model,
                 messages=[
                     {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
                 stream=True,
-                options=state.options,
-                keep_alive=state.keep_alive,
+                options=state.config.options,
+                keep_alive=state.config.keep_alive,
             )
             try:
                 for chunk in stream:
@@ -1079,7 +1069,7 @@ def run_chat(state: ChatState):
     _install_bracketed_paste()
     _bind_mode_toggle(state)
     _install_typeahead_replay(state)
-    use_color = color_util.color_mode_enabled(state.color)
+    use_color = color_util.color_mode_enabled(state.config.color)
     if state.ctx_meter:
         _ensure_ctx_max(state)
     base_prompt = color_util.colored(">>> ", color_util.C_PROMPT, use_color)
@@ -1120,46 +1110,26 @@ def run_chat(state: ChatState):
             state.log_ndjson(user_msg)
             _warn_ctx_overflow(state, stripped)
 
-            if state.chatinput_file_handle:
+            if state.config.chatinput_file_handle:
                 from tool_base import _write_input
-                _write_input(state.chatinput_file_handle, f"[chat input] {stripped}\n")
-                state.chatinput_file_handle.flush()
+                _write_input(state.config.chatinput_file_handle, f"[chat input] {stripped}\n")
+                state.config.chatinput_file_handle.flush()
 
             metrics = {}
             state.start_hotkey_listener()
             try:
                 run_with_tools(
-                    client=state.client,
-                    model=state.model,
                     messages=state.messages,
                     loaded_tools=state.loaded_tools,
                     backend_tools=state.backend_tools,
-                    options=state.options,
-                    keep_alive=state.keep_alive,
-                    show_thinking=state.show_thinking,
-                    no_safety_system_prompt=state.no_safety_system_prompt,
-                    system_prompt = state.system_prompt,
-                    skill_text = state.skill_text,
-                    verbose=state.verbose,
-                    safe=state.safe,
-                    thought_file_handle=state.thought_file_handle,
-                    output_file_handle=state.output_file_handle,
-                    toolcall_file_handle=state.toolcall_file_handle,
-                    chatinput_file_handle=state.chatinput_file_handle,
-                    max_tool_rounds=state.max_tool_rounds,
-                    max_tool_rounds_continuation=state.max_tool_rounds_continuation,
-                    websearch=state.websearch,
-                    color=state.color,
-                    ndjson_log_file_handle=state.ndjson_log_file_handle,
+                    config=state.config,
                     state_manager=state.state_manager,
                     metrics=metrics,
-                    mode_state=state,
-                    show_diff=state.show_diff,
                 )
             finally:
                 state.stop_hotkey_listener()
             state.ctx_usage = metrics
-            state.ctx_usage_model = state.model
+            state.ctx_usage_model = state.config.model
             _accumulate_stats(state, metrics)
             autosave_session(state)
             maybe_auto_compact(state)
@@ -1226,9 +1196,9 @@ def _handle_command(line: str, state: ChatState) -> bool:
 
     elif cmd == "/model":
         if not arg:
-            print(f"Current model: {state.model}")
+            print(f"Current model: {state.config.model}")
         else:
-            state.model = arg
+            state.config.model = arg
             if state.ctx_usage and state.ctx_usage_model and state.ctx_usage_model != arg:
                 state.ctx_usage = dict(state.ctx_usage)
                 state.ctx_usage["_estimated"] = True
@@ -1354,7 +1324,7 @@ def _cmd_context(arg: str, state: ChatState):
     if state.ctx_compact and state.ctx_max:
         print(
             f"Auto-compaction: enabled (threshold {state.ctx_compact_threshold:.0%}, "
-            f"model {state.ctx_compact_model or state.model})"
+            f"model {state.ctx_compact_model or state.config.model})"
         )
 
 
@@ -1369,7 +1339,7 @@ def _cmd_compact_auto(arg: str, state: ChatState):
     elif not arg:
         print(f"Auto-compaction: {'enabled' if state.ctx_compact else 'disabled'} "
               f"(threshold {state.ctx_compact_threshold:.0%}, "
-              f"model {state.ctx_compact_model or state.model})")
+              f"model {state.ctx_compact_model or state.config.model})")
     else:
         print("Usage: /compact auto [on|off]")
 
@@ -1379,7 +1349,7 @@ def _cmd_backend(arg: str, state: ChatState):
 
     No argument shows the current backend and available choices. With an
     argument, a fresh backend instance is created via ``create_backend`` and
-    swapped into ``state.client``. The current model is snapshotted into
+    swapped into ``config.client``. The current model is snapshotted into
     ``last_used_model_by_backend`` before switching; returning to a backend
     restores its last-used model. A fresh backend with no recorded model keeps
     the current model name (the user's responsibility -- valid for the old
@@ -1390,7 +1360,7 @@ def _cmd_backend(arg: str, state: ChatState):
     if not arg:
         print(f"Current backend: {state.backend_name}")
         print(f"Available backends: {', '.join(SUPPORTED_BACKENDS)}")
-        print(f"Model: {state.model}")
+        print(f"Model: {state.config.model}")
         return
     if arg not in SUPPORTED_BACKENDS:
         print(
@@ -1408,19 +1378,19 @@ def _cmd_backend(arg: str, state: ChatState):
         return
 
     old_backend = state.backend_name
-    old_client = state.client
-    state.last_used_model_by_backend[old_backend] = state.model
-    state.client = new_backend
+    old_client = state.config.client
+    state.last_used_model_by_backend[old_backend] = state.config.model
+    state.config.client = new_backend
     state.backend_name = arg
 
     saved = state.last_used_model_by_backend.get(arg)
     if saved:
-        state.model = saved
+        state.config.model = saved
         print(f"Switched to backend '{arg}' (model restored: {saved}).")
     else:
-        print(f"Switched to backend '{arg}'. Model stays: {state.model}.")
+        print(f"Switched to backend '{arg}'. Model stays: {state.config.model}.")
 
-    if state.keep_alive is not None and not getattr(
+    if state.config.keep_alive is not None and not getattr(
         new_backend, "supports_keep_alive", False
     ):
         print(
@@ -1471,34 +1441,15 @@ def _cmd_feed(path: str, state: ChatState):
     try:
         metrics = {}
         run_with_tools(
-            client=state.client,
-            model=state.model,
             messages=state.messages,
             loaded_tools=state.loaded_tools,
             backend_tools=state.backend_tools,
-            options=state.options,
-            keep_alive=state.keep_alive,
-            show_thinking=state.show_thinking,
-            no_safety_system_prompt=state.no_safety_system_prompt,
-            system_prompt = state.system_prompt,
-            skill_text = state.skill_text,
-            verbose=state.verbose,
-            safe=state.safe,
-            thought_file_handle=state.thought_file_handle,
-            output_file_handle=state.output_file_handle,
-            toolcall_file_handle=state.toolcall_file_handle,
-            chatinput_file_handle=state.chatinput_file_handle,
-            max_tool_rounds=state.max_tool_rounds,
-            max_tool_rounds_continuation=state.max_tool_rounds_continuation,
-            websearch=state.websearch,
-            color=state.color,
-            ndjson_log_file_handle=state.ndjson_log_file_handle,
+            config=state.config,
             state_manager=state.state_manager,
             metrics=metrics,
-            show_diff=state.show_diff,
         )
         state.ctx_usage = metrics
-        state.ctx_usage_model = state.model
+        state.ctx_usage_model = state.config.model
         _accumulate_stats(state, metrics)
         autosave_session(state)
         maybe_auto_compact(state)
@@ -1721,26 +1672,26 @@ def serialize_session(
     loading and the output stays small.
     """
     data = {
-        "model": state.model,
+        "model": state.config.model,
         "messages": state.messages,
         "updated_at": time.time(),
     }
     title = state.session_title or _session_title(state)
     if title:
         data["title"] = title
-    if state.mode != "build":
-        data["mode"] = state.mode
+    if state.config.mode != "build":
+        data["mode"] = state.config.mode
     if session_id:
         data["session_id"] = session_id
     if cwd:
         data["cwd"] = cwd
     if created_at:
         data["created_at"] = created_at
-    if state.skill is not None or state.skill_text is not None:
+    if state.skill is not None or state.config.skill_text is not None:
         data["skill"] = state.skill
-        data["skill_text"] = state.skill_text
-    if state.system_prompt is not None:
-        data["system_prompt"] = state.system_prompt
+        data["skill_text"] = state.config.skill_text
+    if state.config.system_prompt is not None:
+        data["system_prompt"] = state.config.system_prompt
     if state.loaded_tool_modules:
         data["loaded_tool_modules"] = list(state.loaded_tool_modules)
     if state.ctx_compact:
@@ -1754,11 +1705,11 @@ def serialize_session(
                 "prompt_eval_count": state.ctx_usage["prompt_eval_count"],
                 "eval_count": state.ctx_usage.get("eval_count") or 0,
             }
-            data["ctx_usage_model"] = state.ctx_usage_model or state.model
+            data["ctx_usage_model"] = state.ctx_usage_model or state.config.model
     if state.stats_by_model:
         stats = {
             "by_model": state.stats_by_model,
-            "model": (state.ctx_usage or {}).get("rounds_model") or state.model,
+            "model": (state.ctx_usage or {}).get("rounds_model") or state.config.model,
         }
         rounds = (state.ctx_usage or {}).get("rounds")
         if rounds:
@@ -1781,17 +1732,17 @@ def apply_session(state: ChatState, data: dict, source: str = "session") -> None
     if data.get("title"):
         state.session_title = data["title"]
     if "model" in data:
-        state.model = data["model"]
+        state.config.model = data["model"]
     stored_usage = data.get("ctx_usage")
     stored_usage_model = data.get("ctx_usage_model")
     if stored_usage and stored_usage.get("prompt_eval_count"):
-        if stored_usage_model and stored_usage_model == state.model:
+        if stored_usage_model and stored_usage_model == state.config.model:
             state.ctx_usage = dict(stored_usage)
             state.ctx_usage_model = stored_usage_model
         else:
             state.ctx_usage = dict(stored_usage)
             state.ctx_usage["_estimated"] = True
-            state.ctx_usage_model = state.model
+            state.ctx_usage_model = state.config.model
     else:
         state.ctx_usage = None
         state.ctx_usage_model = None
@@ -1802,18 +1753,18 @@ def apply_session(state: ChatState, data: dict, source: str = "session") -> None
             state.stats_by_model = dict(by_model)
         else:
             state.stats_by_model = {}
-        if state.ctx_usage is not None and stored_stats.get("model") == state.model:
+        if state.ctx_usage is not None and stored_stats.get("model") == state.config.model:
             rounds = stored_stats.get("rounds")
             if isinstance(rounds, list) and rounds:
                 state.ctx_usage["rounds"] = rounds
-                state.ctx_usage["rounds_model"] = stored_stats.get("model") or state.model
+                state.ctx_usage["rounds_model"] = stored_stats.get("model") or state.config.model
     else:
         state.stats_by_model = {}
     # Mode must be restored before tool reload so refresh_backend_tools()
     # runs with the resumed mode in effect (tools are advertised in full in
     # both modes; write tools are gated at execution time).
     if "mode" in data and data.get("mode") in _MODES:
-        state.mode = data["mode"]
+        state.config.mode = data["mode"]
     if "loaded_tool_modules" in data:
         module_names = data["loaded_tool_modules"]
         state.loaded_tools = []
@@ -1828,9 +1779,9 @@ def apply_session(state: ChatState, data: dict, source: str = "session") -> None
         state.refresh_backend_tools()
     if "skill" in data or "skill_text" in data:
         state.skill = data.get("skill")
-        state.skill_text = data.get("skill_text")
+        state.config.skill_text = data.get("skill_text")
     if "system_prompt" in data:
-        state.system_prompt = data["system_prompt"]
+        state.config.system_prompt = data["system_prompt"]
     if "ctx_compact" in data:
         state.ctx_compact = bool(data["ctx_compact"])
     if "ctx_compact_threshold" in data:
@@ -1878,7 +1829,7 @@ def _cmd_load(path: str, state: ChatState):
         print("Previous conversation archived; use /resume to restore it.")
     apply_session(state, data, source=path)
     print(f"Loaded conversation with {len(state.messages)} messages")
-    _replay_history(state, color_util.color_mode_enabled(state.color))
+    _replay_history(state, color_util.color_mode_enabled(state.config.color))
 
 
 # ---------------------------------------------------------------------------
@@ -2055,7 +2006,7 @@ def _replay_history(state: ChatState, use_color: bool) -> None:
     mirroring their live visibility in a normal run. Stored edit diffs are
     replayed when ``show_diff`` is on, mirroring live edit display.
     """
-    verbose = state.verbose or 0
+    verbose = state.config.verbose or 0
     for m in state.messages:
         role = m.get("role")
         content = m.get("content") or ""
@@ -2071,7 +2022,7 @@ def _replay_history(state: ChatState, use_color: bool) -> None:
                     + color_util.colored(content, color_util.C_INPUT, use_color)
                 )
         elif role == "assistant":
-            if state.show_thinking and m.get("thinking"):
+            if state.config.show_thinking and m.get("thinking"):
                 print(color_util.colored(m["thinking"], color_util.C_THINK, use_color))
                 print()
             tool_calls = m.get("tool_calls") or []
@@ -2091,7 +2042,7 @@ def _replay_history(state: ChatState, use_color: bool) -> None:
         elif role == "tool":
             if verbose >= 1:
                 print(color_util.colored(f"[tool result: {m.get('tool_name') or '?'}]", color_util.C_OUTPUT, use_color))
-            if state.show_diff and m.get("diff"):
+            if state.config.show_diff and m.get("diff"):
                 _print_diff_block(
                     m.get("file") or m.get("tool_name") or "?",
                     m.get("diff") or "",
@@ -2122,7 +2073,7 @@ def _resume_into_state(state: ChatState, path: str, data: dict) -> None:
         print(f"Re-associated session from {old_cwd} to {os.getcwd()}.")
     title = data.get("title") or "(untitled)"
     print(f"Resumed session: {title} ({len(state.messages)} messages)")
-    _replay_history(state, color_util.color_mode_enabled(state.color))
+    _replay_history(state, color_util.color_mode_enabled(state.config.color))
 
 
 def _cmd_resume(arg: str, state: ChatState):
@@ -2349,26 +2300,26 @@ def _cmd_skill(arg: str, state: ChatState):
             return
         combined = "\n\n".join(texts)
         state.skill = " ".join(names)
-        state.skill_text = combined
+        state.config.skill_text = combined
         state.apply_skill()
         print(f"Skill loaded: {' '.join(names)} ({len(combined)} characters)")
 
     elif sub == "unload":
-        if not state.skill_text:
+        if not state.config.skill_text:
             print("No skill loaded.")
             return
         state.skill = None
-        state.skill_text = None
+        state.config.skill_text = None
         state.apply_skill()
         print("Skill unloaded.")
 
     elif sub == "show":
-        if not state.skill_text:
+        if not state.config.skill_text:
             print("No skill loaded.")
             return
         print(f"Active skill: {state.skill or '(loaded via --skill)'}")
         print("---")
-        print(state.skill_text)
+        print(state.config.skill_text)
 
     else:
         print("Skill commands:")
@@ -2382,17 +2333,17 @@ def _cmd_systemprompt(arg: str, state: ChatState):
     arg = arg.strip()
 
     if arg == "unset":
-        if state.system_prompt is None:
+        if state.config.system_prompt is None:
             print("No system prompt set.")
             return
-        state.system_prompt = None
+        state.config.system_prompt = None
         state.apply_skill()
         print("System prompt unset.")
         return
 
     if not arg or arg == "show":
-        if state.system_prompt:
-            print(state.system_prompt)
+        if state.config.system_prompt:
+            print(state.config.system_prompt)
         else:
             print("No system prompt set.")
         return
@@ -2400,7 +2351,7 @@ def _cmd_systemprompt(arg: str, state: ChatState):
     text = _read_text_file(arg, label="system prompt file")
     if text is None:
         return
-    state.system_prompt = text
+    state.config.system_prompt = text
     state.apply_skill()
     print(f"System prompt loaded ({len(text)} characters)")
 

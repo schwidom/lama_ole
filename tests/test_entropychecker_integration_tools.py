@@ -25,6 +25,7 @@ from tools_security.validate_path import register_basepath
 
 register_basepath("/tmp")
 
+from tool_base.config import RunConfig  # noqa: E402
 from tools_insecure_outdated_deprecated.dev_tools_safer import read_file as safer_read_file
 from tools_insecure_outdated_deprecated.dev_tools_safer import grep as safer_grep
 from tools.dev_tools_readonly import read_file as readonly_read_file
@@ -245,7 +246,7 @@ class TestFeedCommandEntropy:
     """chat.py /feed command entropy integration."""
 
     def _make_state(self):
-        return chat.ChatState(client=None, model="test-model")
+        return chat.ChatState(config=RunConfig(client=None, model="test-model"))
 
     def test_feed_binary_rejected(self, capsys, monkeypatch):
         called = []

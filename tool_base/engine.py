@@ -11,10 +11,8 @@ from .models import Tool
 from .constants import DANGEROUS_TOOLS
 from .utils import create_uuid_15
 
-_MISSING = object()
-
 # Models for which we already warned that the backend produced no thinking
-# output (module-level fallback for one-shot runs; the REPL keeps a per-state
+# output (module-level fallback for one-shot runs; the REPL keeps a per-config
 # copy so the warning fires at most once per model in a session).
 _WARNED_NO_THINKING_MODELS = set()
 
@@ -69,11 +67,11 @@ def _websearch_tool() -> Dict:
     }
 
 
-def _warn_missing_thinking(model: str, mode_state) -> None:
+def _warn_missing_thinking(model: str, config=None) -> None:
     """Warn (once per model per session) that no thinking output was produced."""
     store = None
-    if mode_state is not None:
-        store = getattr(mode_state, "_warned_no_thinking_models", None)
+    if config is not None:
+        store = getattr(config, "_warned_no_thinking_models", None)
     if store is None:
         store = _WARNED_NO_THINKING_MODELS
     if model in store:
@@ -432,40 +430,25 @@ def compose_system_prompt(
 
 
 def run_with_tools(
-    client,
-    model,
     messages: List[dict],
     loaded_tools: List[Tool],
     backend_tools: Optional[List[Dict]],
-    options: dict,
-    keep_alive: Any,
-    show_thinking: bool,
-    no_safety_system_prompt: bool,
-    system_prompt: Optional[str] = None,
-    skill_text: Optional[str] = None,
-    mode: Optional[str] = None,
-    verbose: int = 0,
-    safe: bool = False,
-    thought_file_handle=None,
-    output_file_handle=None,
-    toolcall_file_handle=None,
-    chatinput_file_handle=None,
-    max_tool_rounds: Optional[int] = None,
-    max_tool_rounds_continuation: str = "ask",
-    websearch: bool = False,
-    ndjson_log_file_handle=None,
-    color: str = "auto",
+    config,
     state_manager=None,
     metrics: Optional[dict] = None,
-    mode_state=None,
-    show_diff: bool = True,
 ):
     from .loop_states import ExecutionState, StateManager, ExecutionInterrupted
     from .logging import StateLogger
+    from .config import RunConfig
 
+    if not isinstance(config, RunConfig):
+        raise TypeError(
+            "run_with_tools() expects a RunConfig object as 'config'; "
+            f"got {type(config).__name__}"
+        )
     if state_manager is None:
         state_manager = StateManager()
-    use_color = color_util.color_mode_enabled(color)
+    use_color = color_util.color_mode_enabled(config.color)
     tool_rounds = 0
     think_state = False
     final_response = ""
@@ -478,20 +461,7 @@ def run_with_tools(
 
     def _current_mode() -> str:
         """Effective mode right now (may change mid-turn via the hotkey)."""
-        if mode_state is not None:
-            current = getattr(mode_state, "mode", None)
-            if current is not None:
-                return current
-        return mode or "build"
-
-    def _refresh_tools_for_request():
-        """Adopt mode_state's advertised tool list after a mid-turn toggle."""
-        if mode_state is None:
-            return tools_for_request
-        new_tools = getattr(mode_state, "backend_tools", _MISSING)
-        if new_tools is not _MISSING and new_tools is not tools_for_request:
-            return new_tools
-        return tools_for_request
+        return config.mode or "build"
 
     tools_for_request = backend_tools
 
@@ -500,8 +470,8 @@ def run_with_tools(
     @contextmanager
     def _hotkey_suspended():
         """Park the mid-turn hotkey listener around a blocking stdin prompt."""
-        pause = getattr(mode_state, "hotkey_pause", None)
-        resume = getattr(mode_state, "hotkey_resume", None)
+        pause = getattr(config, "hotkey_pause", None)
+        resume = getattr(config, "hotkey_resume", None)
         if pause is not None:
             pause()
         try:
@@ -511,17 +481,17 @@ def run_with_tools(
                 resume()
 
     thought_logger = (
-        StateLogger(handle=thought_file_handle) if thought_file_handle else None
+        StateLogger(handle=config.thought_file_handle) if config.thought_file_handle else None
     )
     output_logger = (
-        StateLogger(handle=output_file_handle) if output_file_handle else None
+        StateLogger(handle=config.output_file_handle) if config.output_file_handle else None
     )
     toolcall_logger = (
-        StateLogger(handle=toolcall_file_handle) if toolcall_file_handle else None
+        StateLogger(handle=config.toolcall_file_handle) if config.toolcall_file_handle else None
     )
 
     def _emit_thinking(text: str) -> None:
-        if show_thinking:
+        if config.show_thinking:
             print(color_util.colored(text, color_util.C_THINK, use_color), end='', flush=True)
         if thought_logger:
             thought_logger.write_thought(text)
@@ -534,20 +504,20 @@ def run_with_tools(
     has_system = any(m.get("role") == "system" for m in messages)
     if not has_system:
         sp = compose_system_prompt(
-            system_prompt=system_prompt,
-            skill_text=skill_text,
-            no_safety_system_prompt=no_safety_system_prompt,
-            mode=mode,
+            system_prompt=config.system_prompt,
+            skill_text=config.skill_text,
+            no_safety_system_prompt=config.no_safety_system_prompt,
+            mode=config.mode,
         )
 
         system_msg = {"role": "system", "content": sp}
         _stamp_message(system_msg)
         messages.insert(0, system_msg)
-        if ndjson_log_file_handle:
+        if config.ndjson_log_file_handle:
             from .logging import _log_ndjson_message
-            _log_ndjson_message(ndjson_log_file_handle, model, system_msg)
+            _log_ndjson_message(config.ndjson_log_file_handle, config.model, system_msg)
 
-    if websearch:
+    if config.websearch:
         web_tool = _websearch_tool()
         if backend_tools:
             backend_tools.append(web_tool)
@@ -555,22 +525,22 @@ def run_with_tools(
             backend_tools = [web_tool]
         tools_for_request = backend_tools
 
-    if verbose >= 2:
+    if config.verbose >= 2:
         from .logging import _log_messages_payload
         _log_messages_payload(messages, file=sys.stderr)
 
     while True:
-        if max_tool_rounds is not None and tool_rounds >= max_tool_rounds:
-            if max_tool_rounds_continuation == "fallback":
+        if config.max_tool_rounds is not None and tool_rounds >= config.max_tool_rounds:
+            if config.max_tool_rounds_continuation == "fallback":
                 print(
                     "Reached maximum number of tool-calling rounds.",
                     file=sys.stderr,
                 )
                 state_manager.reset()
                 break
-            elif max_tool_rounds_continuation == "ask":
+            elif config.max_tool_rounds_continuation == "ask":
                 print(
-                    f"Maximum tool rounds ({max_tool_rounds}) reached.",
+                    f"Maximum tool rounds ({config.max_tool_rounds}) reached.",
                     file=sys.stderr,
                 )
                 print("Options:", file=sys.stderr)
@@ -596,9 +566,9 @@ def run_with_tools(
                     try:
                         with _hotkey_suspended():
                             new_val = sys.stdin.readline().strip()
-                        max_tool_rounds = int(new_val)
+                        config.max_tool_rounds = int(new_val)
                         print(
-                            f"New limit set to {max_tool_rounds}.",
+                            f"New limit set to {config.max_tool_rounds}.",
                             file=sys.stderr,
                         )
                     except (ValueError, EOFError):
@@ -610,7 +580,7 @@ def run_with_tools(
                         print("\nInterrupted.", file=sys.stderr)
                         break
                 elif choice == "2":
-                    max_tool_rounds = None
+                    config.max_tool_rounds = None
                     print("Unlimited rounds set.", file=sys.stderr)
                 elif choice == "4":
                     state_manager.reset()
@@ -621,7 +591,7 @@ def run_with_tools(
                     break
                 continue
 
-        if verbose >= 2:
+        if config.verbose >= 2:
             from .logging import _log_messages_payload
             _log_messages_payload(messages, file=sys.stderr)
 
@@ -645,16 +615,14 @@ def run_with_tools(
         if turn_elapsed_started is None:
             turn_elapsed_started = round_started
 
-        tools_for_request = _refresh_tools_for_request()
-
         try:
-            stream = client.chat(
-                model=model,
+            stream = config.client.chat(
+                model=config.model,
                 messages=[{k: v for k, v in m.items() if k != "thinking"} for m in messages],
                 tools=tools_for_request,
                 stream=True,
-                options=options,
-                keep_alive=keep_alive,
+                options=config.options,
+                keep_alive=config.keep_alive,
             )
             try:
                 for chunk in stream:
@@ -667,7 +635,7 @@ def run_with_tools(
                     if getattr(chunk, "prompt_eval_duration_ns", None) is not None:
                         last_prompt_eval_duration_ns = chunk.prompt_eval_duration_ns
 
-                    if verbose >= 3:
+                    if config.verbose >= 3:
                         from .logging import _log_chunk
                         _log_chunk(chunk, file=sys.stderr)
 
@@ -684,7 +652,7 @@ def run_with_tools(
                                 state_manager.transition_to(ExecutionState.THINKING)
                                 if thought_logger:
                                     thought_logger.new_slice()
-                                if show_thinking:
+                                if config.show_thinking:
                                     ts = time.strftime("%Y-%m-%d %H:%M:%S")
                                     print(color_util.colored(f"[{ts}] Thinking starts", color_util.C_THINK, use_color))
                             response_thinking += thinking
@@ -703,7 +671,7 @@ def run_with_tools(
                                 pending_think_display = _flush_pending_display(
                                     pending_think_display, _emit_thinking
                                 )
-                                if show_thinking:
+                                if config.show_thinking:
                                     ts = time.strftime("%Y-%m-%d %H:%M:%S")
                                     print()
                                     print(color_util.colored(f"[{ts}] Thinking ends", color_util.C_THINK, use_color))
@@ -745,7 +713,7 @@ def run_with_tools(
         if think_state:
             think_state = False
             state_manager.transition_to(ExecutionState.IDLE)
-            if show_thinking:
+            if config.show_thinking:
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
                 print()
                 print(color_util.colored(f"[{ts}] Thinking ends", color_util.C_THINK, use_color))
@@ -759,7 +727,7 @@ def run_with_tools(
             metrics["eval_duration_ns"] = last_eval_duration_ns
             metrics["prompt_eval_duration_ns"] = last_prompt_eval_duration_ns
             metrics["last_round_kind"] = "tool call" if response_tool_calls else "final answer"
-            metrics["rounds_model"] = model
+            metrics["rounds_model"] = config.model
 
         if metrics is not None:
             turn_rounds.append(
@@ -779,11 +747,11 @@ def run_with_tools(
                 "content": response_content or None,
                 "tool_calls": normalized_calls,
             }
-            if show_thinking and think_text.strip():
+            if config.show_thinking and think_text.strip():
                 assistant_msg["thinking"] = think_text
             _stamp_message(assistant_msg)
             messages.append(assistant_msg)
-            if ndjson_log_file_handle:
+            if config.ndjson_log_file_handle:
                 from .logging import _log_ndjson_message
                 if response_thinking:
                     thought_msg = {
@@ -791,7 +759,7 @@ def run_with_tools(
                         "content": response_thinking,
                         "mode": "thinking"
                     }
-                    _log_ndjson_message(ndjson_log_file_handle, model, thought_msg)
+                    _log_ndjson_message(config.ndjson_log_file_handle, config.model, thought_msg)
                 
                 if response_thinking:
                     output_msg = {
@@ -800,9 +768,9 @@ def run_with_tools(
                         "tool_calls": normalized_calls,
                         "mode": "output",
                     }
-                    _log_ndjson_message(ndjson_log_file_handle, model, output_msg)
+                    _log_ndjson_message(config.ndjson_log_file_handle, config.model, output_msg)
                 else:
-                    _log_ndjson_message(ndjson_log_file_handle, model, assistant_msg)
+                    _log_ndjson_message(config.ndjson_log_file_handle, config.model, assistant_msg)
 
             for tc in normalized_calls:
                 fn = tc.get("function") or {}
@@ -819,7 +787,7 @@ def run_with_tools(
                     None,
                 )
 
-                if verbose >= 1:
+                if config.verbose >= 1:
                     ts = time.strftime("%Y-%m-%d %H:%M:%S")
                     print(
                         f"[{ts}] [tool: {tool_name}({args_str})]",
@@ -851,7 +819,7 @@ def run_with_tools(
                             }
                         else:
                             should_run = True
-                            if safe and tool_name in DANGEROUS_TOOLS:
+                            if config.safe and tool_name in DANGEROUS_TOOLS:
                                 print(
                                     f"\n[DANGER] Tool '{tool_name}' called with: {args_str}",
                                     file=sys.stderr,
@@ -890,12 +858,12 @@ def run_with_tools(
 
                 # Defensive entropy check (opt-in): catches future tools that
                 # bypass the per-tool integration.
-                if verbose >= 2 or os.environ.get("LAMA_OLE_ENTROPY_CHECK"):
+                if config.verbose >= 2 or os.environ.get("LAMA_OLE_ENTROPY_CHECK"):
                     _entropy_check_tool_result(result, tool_name)
 
-                if verbose >= 1:
+                if config.verbose >= 1:
                     display = json.dumps(result, indent=2) if isinstance(result, dict) else str(result)
-                    if verbose < 2 and len(display) > 500:
+                    if config.verbose < 2 and len(display) > 500:
                         display = display[:500] + "..."
                     print(
                         f"[tool result: {display}]",
@@ -903,7 +871,7 @@ def run_with_tools(
                         flush=True,
                     )
 
-                if show_diff and isinstance(result, dict):
+                if config.show_diff and isinstance(result, dict):
                     _print_diff_block(
                         result.get("file") or tool_name,
                         result.get("diff") or "",
@@ -948,11 +916,11 @@ def run_with_tools(
                 }
                 _stamp_message(tool_msg)
                 messages.append(tool_msg)
-                if ndjson_log_file_handle:
+                if config.ndjson_log_file_handle:
                     from .logging import _log_ndjson_message
-                    _log_ndjson_message(ndjson_log_file_handle, model, tool_msg)
+                    _log_ndjson_message(config.ndjson_log_file_handle, config.model, tool_msg)
 
-            if verbose >= 2:
+            if config.verbose >= 2:
                 total_chars = sum(
                     len(m.get("content", "") or "") for m in messages
                 )
@@ -965,16 +933,16 @@ def run_with_tools(
 
             tool_rounds += 1
         else:
-            if show_thinking and not response_thinking:
-                _warn_missing_thinking(model, mode_state)
+            if config.show_thinking and not response_thinking:
+                _warn_missing_thinking(config.model, config)
 
             assistant_msg = {"role": "assistant", "content": response_content}
-            if show_thinking and think_text.strip():
+            if config.show_thinking and think_text.strip():
                 assistant_msg["thinking"] = think_text
             _stamp_message(assistant_msg)
 
             messages.append(assistant_msg)
-            if ndjson_log_file_handle:
+            if config.ndjson_log_file_handle:
                 from .logging import _log_ndjson_message
                 if response_thinking:
                     thought_msg = {
@@ -982,16 +950,16 @@ def run_with_tools(
                         "content": response_thinking,
                         "mode": "thinking"
                     }
-                    _log_ndjson_message(ndjson_log_file_handle, model, thought_msg)
+                    _log_ndjson_message(config.ndjson_log_file_handle, config.model, thought_msg)
 
                     output_msg = {
                         "role": "assistant",
                         "content": response_content or None,
                         "mode": "output",
                     }
-                    _log_ndjson_message(ndjson_log_file_handle, model, output_msg)
+                    _log_ndjson_message(config.ndjson_log_file_handle, config.model, output_msg)
                 else:
-                    _log_ndjson_message(ndjson_log_file_handle, model, assistant_msg)
+                    _log_ndjson_message(config.ndjson_log_file_handle, config.model, assistant_msg)
 
             final_response = response_content
             state_manager.transition_to(ExecutionState.IDLE)

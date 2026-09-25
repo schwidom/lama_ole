@@ -21,6 +21,7 @@ if lama_ole_dir not in sys.path:
 import chat  # noqa: E402
 from backends.base import ChatChunk  # noqa: E402
 from tool_base import StateManager, run_with_tools  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 from tool_base.loop_states import (  # noqa: E402
     ExecutionInterrupted,
     ExecutionState,
@@ -58,19 +59,24 @@ class FakeClient:
 
 
 def _run_kwargs(client, messages, **extra):
+    show_thinking = extra.pop("show_thinking", False)
+    mode = extra.pop("mode", None)
     kwargs = dict(
-        client=client,
-        model="test",
         messages=messages,
         loaded_tools=[],
         backend_tools=None,
-        options={},
-        keep_alive=None,
-        show_thinking=False,
-        no_safety_system_prompt=True,
-        system_prompt=None,
-        skill_text=None,
-        color="never",
+        config=RunConfig(
+            client=client,
+            model="test",
+            options={},
+            keep_alive=None,
+            show_thinking=show_thinking,
+            no_safety_system_prompt=True,
+            system_prompt=None,
+            skill_text=None,
+            color="never",
+            mode=mode,
+        ),
     )
     kwargs.update(extra)
     return kwargs
@@ -140,7 +146,11 @@ def test_run_chat_interrupt_during_turn_rolls_back_and_continues(
     monkeypatch, capsys
 ):
     state = chat.ChatState(
-        client=FakeClient(stream=_interrupting_stream()), model="test", color="never"
+        config=RunConfig(
+            client=FakeClient(stream=_interrupting_stream()),
+            model="test",
+            color="never",
+        )
     )
     sequence = ["hello", KeyboardInterrupt(), EOFError()]
 
@@ -256,7 +266,11 @@ def test_run_chat_interrupt_keeps_completed_tool_rounds(monkeypatch, capsys):
         _interrupting_stream(),  # partial content, then KeyboardInterrupt
     ]
     state = chat.ChatState(
-        client=StreamSequenceClient(streams), model="test", color="never"
+        config=RunConfig(
+            client=StreamSequenceClient(streams),
+            model="test",
+            color="never",
+        )
     )
     sequence = ["read files", KeyboardInterrupt(), EOFError()]
 
@@ -308,9 +322,11 @@ def test_run_chat_interrupt_during_tool_execution_drops_dangling_toolcall(
             return self._stream
 
     state = chat.ChatState(
-        client=FakeClient(),
-        model="test",
-        color="never",
+        config=RunConfig(
+            client=FakeClient(),
+            model="test",
+            color="never",
+        ),
         loaded_tools=[
             Tool(name="boom", description="interrupts", parameters={}, fn=boom)
         ],
@@ -360,9 +376,11 @@ def test_run_chat_interrupt_during_multicall_round_drops_partial_results(
             return self._stream
 
     state = chat.ChatState(
-        client=FakeClient(),
-        model="test",
-        color="never",
+        config=RunConfig(
+            client=FakeClient(),
+            model="test",
+            color="never",
+        ),
         loaded_tools=[
             Tool(name="ok", description="ok", parameters={}, fn=ok),
             Tool(name="boom", description="boom", parameters={}, fn=boom),
@@ -384,7 +402,10 @@ def test_run_chat_interrupt_during_multicall_round_drops_partial_results(
 
 
 def _drop_state(messages, user_msg):
-    state = chat.ChatState(client=None, model="m", messages=messages)
+    state = chat.ChatState(
+        config=RunConfig(client=None, model="m"),
+        messages=messages,
+    )
     chat._drop_incomplete_trailing_messages(state, user_msg)
     return [m["role"] for m in state.messages]
 

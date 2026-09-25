@@ -27,6 +27,7 @@ if _cwd not in sys.path:
 from parameters import PARAMETERS, process_inspection_flags
 from backends.factory import create_backend
 from tool_base import (
+    RunConfig,
     load_tools,
     set_vision_models,
     run_with_tools,
@@ -308,7 +309,7 @@ def _resume_session_into(state, resume):
     """
     path, data = resume
     session_model = data.get("model")
-    cli_model = state.model
+    cli_model = state.config.model
     if cli_model and session_model and cli_model != session_model:
         choice = _prompt_model_choice(cli_model, session_model)
         if choice == "abort":
@@ -322,7 +323,7 @@ def _resume_session_into(state, resume):
         f"Resumed session '{title}' ({n} messages). Use --no-resume to start fresh.",
         file=sys.stderr,
     )
-    _replay_history(state, color_util.color_mode_enabled(state.color))
+    _replay_history(state, color_util.color_mode_enabled(state.config.color))
 
 
 def main():
@@ -550,48 +551,53 @@ def main():
             sys.exit(1)
         ndjson_log_file_handle = open(args.logndjson, "w", encoding="utf-8")
 
+    options = {
+        "temperature": args.temperature,
+    }
+
+    if None != args.num_ctx:
+        options["num_ctx"] = args.num_ctx
+
+    if None != args.num_gpu:
+        options["num_gpu"] = args.num_gpu
+
+    run_config = RunConfig(
+        client=client,
+        model=args.model,
+        options=options,
+        keep_alive=args.keep_alive,
+        show_thinking=args.thinking,
+        no_safety_system_prompt=args.no_safety_system_prompt,
+        system_prompt=system_prompt,
+        skill_text=skill_text,
+        verbose=args.verbose,
+        safe=args.safe,
+        mode=args.mode,
+        show_diff=args.show_diff,
+        thought_file_handle=thought_file_handle,
+        output_file_handle=output_file_handle,
+        toolcall_file_handle=toolcall_file_handle,
+        chatinput_file_handle=chatinput_file_handle,
+        max_tool_rounds=args.max_tool_rounds,
+        max_tool_rounds_continuation=args.max_tool_rounds_continuation,
+        websearch=args.ollama_websearch,
+        ndjson_log_file_handle=ndjson_log_file_handle,
+        color=args.color,
+    )
+
     try:
-        options = {
-            "temperature": args.temperature,
-        }
-
-        if None != args.num_ctx:
-            options["num_ctx"] = args.num_ctx
-
-        if None != args.num_gpu:
-            options["num_gpu"] = args.num_gpu
-
         if args.chat:
             sessions_dir = _default_sessions_dir()
+
             state = ChatState(
-                client=client,
-                model=args.model,
+                config=run_config,
                 backend_name=args.backend,
                 host=args.host,
                 api_key=args.api_key,
                 loaded_tools=loaded_tools,
                 loaded_tool_modules=list(args.tools or []),
                 backend_tools=backend_tools,
-                options=options,
-                keep_alive=args.keep_alive,
-                show_thinking=args.thinking,
-                no_safety_system_prompt=args.no_safety_system_prompt,
-                system_prompt= system_prompt,
-                skill_text= skill_text,
-                verbose=args.verbose,
-                safe=args.safe,
-                mode=args.mode,
-                show_diff=args.show_diff,
-                thought_file_handle=thought_file_handle,
-                output_file_handle=output_file_handle,
-                toolcall_file_handle=toolcall_file_handle,
-                chatinput_file_handle=chatinput_file_handle,
-                max_tool_rounds=args.max_tool_rounds,
-                max_tool_rounds_continuation=args.max_tool_rounds_continuation,
-                websearch=args.ollama_websearch,
                 ndjson_log_path=args.logndjson,
-                ndjson_log_file_handle=ndjson_log_file_handle,
-                color=args.color,
                 sessions_dir=sessions_dir,
                 session_autosave=args.autosave,
                 ctx_meter=args.ctx_meter,
@@ -615,35 +621,15 @@ def main():
                 try:
                     metrics = {}
                     run_with_tools(
-                        client=client,
-                        model=args.model,
                         messages=state.messages,
-                        loaded_tools=loaded_tools,
-                        backend_tools=backend_tools,
-                        options=options,
-                        keep_alive=args.keep_alive,
-                        show_thinking=args.thinking,
-                        no_safety_system_prompt= args.no_safety_system_prompt,
-                        system_prompt= system_prompt,
-                        skill_text= skill_text,
-                        verbose=args.verbose,
-                        safe=args.safe,
-                        mode=args.mode,
-                        show_diff=args.show_diff,
-                        thought_file_handle=thought_file_handle,
-                        output_file_handle=output_file_handle,
-                        toolcall_file_handle=toolcall_file_handle,
-                        chatinput_file_handle=chatinput_file_handle,
-                        max_tool_rounds=args.max_tool_rounds,
-                        max_tool_rounds_continuation=args.max_tool_rounds_continuation,
-                        websearch=args.ollama_websearch,
-                        ndjson_log_file_handle=ndjson_log_file_handle,
-                        color=args.color,
+                        loaded_tools=state.loaded_tools,
+                        backend_tools=state.backend_tools,
+                        config=state.config,
                         state_manager=state.state_manager,
                         metrics=metrics,
                     )
                     state.ctx_usage = metrics
-                    state.ctx_usage_model = args.model
+                    state.ctx_usage_model = state.config.model
                     autosave_session(state)
                 except KeyboardInterrupt:
                     print(
@@ -664,30 +650,10 @@ def main():
             if ndjson_log_file_handle:
                 _log_ndjson_message(ndjson_log_file_handle, args.model, messages[0])
             run_with_tools(
-                client=client,
-                model=args.model,
                 messages=messages,
                 loaded_tools=loaded_tools,
                 backend_tools=backend_tools,
-                options=options,
-                keep_alive=args.keep_alive,
-                show_thinking=args.thinking,
-                no_safety_system_prompt= args.no_safety_system_prompt,
-                system_prompt= system_prompt,
-                skill_text= skill_text,
-                verbose=args.verbose,
-                safe=args.safe,
-                mode=args.mode,
-                show_diff=args.show_diff,
-                thought_file_handle=thought_file_handle,
-                output_file_handle=output_file_handle,
-                toolcall_file_handle=toolcall_file_handle,
-                chatinput_file_handle=chatinput_file_handle,
-                max_tool_rounds=args.max_tool_rounds,
-                max_tool_rounds_continuation=args.max_tool_rounds_continuation,
-                websearch=args.ollama_websearch,
-                ndjson_log_file_handle=ndjson_log_file_handle,
-                color=args.color,
+                config=run_config,
             )
 
     except KeyboardInterrupt:

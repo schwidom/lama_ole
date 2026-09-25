@@ -28,6 +28,7 @@ from tool_base import (  # noqa: E402
     load_tools,
     run_with_tools,
 )
+from tool_base.config import RunConfig  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -133,28 +134,29 @@ class FakeClient:
 
 
 def _run_kwargs(client, messages, **extra):
+    mode_state = extra.pop("mode_state", None)
+    mode = extra.pop("mode", None)
+    if mode is None and mode_state is not None:
+        mode = getattr(mode_state, "mode", None)
     kwargs = dict(
-        client=client,
-        model="test",
         messages=messages,
         loaded_tools=[],
         backend_tools=None,
-        options={},
-        keep_alive=None,
-        show_thinking=False,
-        no_safety_system_prompt=True,
-        system_prompt=None,
-        skill_text=None,
-        color="never",
+        config=RunConfig(
+            client=client,
+            model="test",
+            options={},
+            keep_alive=None,
+            show_thinking=False,
+            no_safety_system_prompt=True,
+            system_prompt=None,
+            skill_text=None,
+            color="never",
+            mode=mode,
+        ),
     )
     kwargs.update(extra)
     return kwargs
-
-
-class MutableModeState:
-    def __init__(self, mode="build", backend_tools=None):
-        self.mode = mode
-        self.backend_tools = backend_tools
 
 
 def _tools(called):
@@ -197,7 +199,7 @@ def test_write_tool_blocked_in_plan_mode():
             client,
             messages,
             loaded_tools=_tools(called),
-            mode_state=MutableModeState(mode="plan"),
+            mode="plan",
         )
     )
     assert called == []
@@ -219,7 +221,7 @@ def test_readonly_tool_runs_in_plan_mode():
             client,
             messages,
             loaded_tools=_tools(called),
-            mode_state=MutableModeState(mode="plan"),
+            mode="plan",
         )
     )
     assert called == ["read"]
@@ -240,7 +242,7 @@ def test_write_tool_runs_in_build_mode():
             client,
             messages,
             loaded_tools=_tools(called),
-            mode_state=MutableModeState(mode="build"),
+            mode="build",
         )
     )
     assert called == ["write"]
@@ -248,13 +250,24 @@ def test_write_tool_runs_in_build_mode():
 
 
 def test_mid_turn_flip_blocks_later_writes_without_changing_tools():
-    state = MutableModeState(mode="build", backend_tools=["tools-v1"])
+    config = RunConfig(
+        client=None,
+        model="test",
+        options={},
+        keep_alive=None,
+        show_thinking=False,
+        no_safety_system_prompt=True,
+        system_prompt=None,
+        skill_text=None,
+        color="never",
+        mode="build",
+    )
     called = []
 
     def write_fn():
         called.append("write")
         # Mid-turn toggle: the user hits Shift+Tab while this turn is in flight.
-        state.mode = "plan"
+        config.mode = "plan"
         return {"status": "success", "data": "ok"}
 
     def read_fn():
@@ -273,6 +286,7 @@ def test_mid_turn_flip_blocks_later_writes_without_changing_tools():
             [_chunk(content="done")],
         ]
     )
+    config.client = client
     messages = [{"role": "user", "content": "hi"}]
     result = run_with_tools(
         **_run_kwargs(
@@ -280,7 +294,7 @@ def test_mid_turn_flip_blocks_later_writes_without_changing_tools():
             messages,
             loaded_tools=tools,
             backend_tools=["tools-v1"],
-            mode_state=state,
+            config=config,
         )
     )
     # Round 1 ran the write tool (build); after the flip the read-only tool
@@ -326,18 +340,18 @@ def _system_content(state):
 
 
 def test_toggle_mode_round_trip():
-    st = chat.ChatState(client=None, model="m")
+    st = chat.ChatState(config=RunConfig(client=None, model="m"))
     st.messages = [{"role": "user", "content": "hi"}]
     st.toggle_mode()
-    assert st.mode == "plan"
+    assert st.config.mode == "plan"
     assert "[PLAN MODE BEGIN]" in _system_content(st)
     st.toggle_mode()
-    assert st.mode == "build"
+    assert st.config.mode == "build"
     assert "[PLAN MODE BEGIN]" not in _system_content(st)
 
 
 def test_hotkey_helpers_without_listener():
-    st = chat.ChatState(client=None, model="m")
+    st = chat.ChatState(config=RunConfig(client=None, model="m"))
     st.hotkey_pause()
     st.hotkey_resume()
     assert st.hotkey_drain() == ""

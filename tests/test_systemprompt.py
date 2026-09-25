@@ -12,6 +12,7 @@ if lama_ole_dir not in sys.path:
     sys.path.insert(0, lama_ole_dir)
 
 import chat  # noqa: E402
+from tool_base.config import RunConfig  # noqa: E402
 
 
 def _write_text(path, text):
@@ -21,7 +22,7 @@ def _write_text(path, text):
 
 
 def _make_state():
-    return chat.ChatState(client=None, model="m")
+    return chat.ChatState(config=RunConfig(client=None, model="m"))
 
 
 class TestCmdSystemprompt:
@@ -33,7 +34,7 @@ class TestCmdSystemprompt:
         chat._cmd_systemprompt(str(sp_file), state)
         out = capsys.readouterr().out
         assert "System prompt loaded" in out
-        assert state.system_prompt == "You are a pirate."
+        assert state.config.system_prompt == "You are a pirate."
         assert state.messages[0]["role"] == "system"
         assert "You are a pirate." in state.messages[0]["content"]
 
@@ -52,7 +53,7 @@ class TestCmdSystemprompt:
     def test_keeps_active_skill(self, tmp_path, capsys):
         state = _make_state()
         state.messages = [{"role": "user", "content": "hi"}]
-        state.skill_text = "SKILL"
+        state.config.skill_text = "SKILL"
         sp_file = tmp_path / "sp.txt"
         _write_text(str(sp_file), "BASE PROMPT")
         chat._cmd_systemprompt(str(sp_file), state)
@@ -62,13 +63,13 @@ class TestCmdSystemprompt:
 
     def test_show_bare(self, tmp_path, capsys):
         state = _make_state()
-        state.system_prompt = "CURRENT"
+        state.config.system_prompt = "CURRENT"
         chat._cmd_systemprompt("", state)
         assert "CURRENT" in capsys.readouterr().out
 
     def test_show_subcommand(self, tmp_path, capsys):
         state = _make_state()
-        state.system_prompt = "CURRENT"
+        state.config.system_prompt = "CURRENT"
         chat._cmd_systemprompt("show", state)
         assert "CURRENT" in capsys.readouterr().out
 
@@ -80,13 +81,13 @@ class TestCmdSystemprompt:
     def test_unset(self, tmp_path, capsys):
         state = _make_state()
         state.messages = [{"role": "user", "content": "hi"}]
-        state.system_prompt = "BASE"
+        state.config.system_prompt = "BASE"
         state.apply_skill()
         assert "BASE" in state.messages[0]["content"]
         chat._cmd_systemprompt("unset", state)
         out = capsys.readouterr().out
         assert "System prompt unset." in out
-        assert state.system_prompt is None
+        assert state.config.system_prompt is None
         assert "BASE" not in state.messages[0]["content"]
 
     def test_unset_no_prompt(self, tmp_path, capsys):
@@ -99,7 +100,7 @@ class TestCmdSystemprompt:
         chat._cmd_systemprompt(str(tmp_path / "nope.txt"), state)
         out = capsys.readouterr().out
         assert "not found" in out.lower()
-        assert state.system_prompt is None
+        assert state.config.system_prompt is None
 
     def test_binary_rejected(self, tmp_path, capsys):
         state = _make_state()
@@ -109,7 +110,7 @@ class TestCmdSystemprompt:
         chat._cmd_systemprompt(str(bad), state)
         out = capsys.readouterr().out
         assert "entropy check" in out.lower()
-        assert state.system_prompt is None
+        assert state.config.system_prompt is None
 
     def test_handle_command_dispatches(self, tmp_path, capsys):
         state = _make_state()
@@ -128,13 +129,13 @@ class TestCmdSystemprompt:
 class TestSystempromptPersistence:
     def test_save_load_persists_system_prompt(self, tmp_path, capsys):
         state = _make_state()
-        state.system_prompt = "PERSISTED PROMPT"
+        state.config.system_prompt = "PERSISTED PROMPT"
         path = str(tmp_path / "conv.json")
         chat._cmd_save(path, state)
 
         state2 = _make_state()
         chat._cmd_load(path, state2)
-        assert state2.system_prompt == "PERSISTED PROMPT"
+        assert state2.config.system_prompt == "PERSISTED PROMPT"
 
     def test_save_without_prompt_omits_field(self, tmp_path, capsys):
         state = _make_state()

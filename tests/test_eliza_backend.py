@@ -19,6 +19,7 @@ if lama_ole_dir not in sys.path:
 from backends.base import ChatChunk
 from backends.eliza_scripts import ELIZA_SCRIPTS
 from backends.factory import create_backend
+from tool_base.config import RunConfig
 from tool_base.engine import run_with_tools
 from tool_base.registry import load_tools
 
@@ -61,16 +62,18 @@ def test_read_test_dialogue(tmp_path, monkeypatch, capsys):
     tools = load_tools("tools.example_tools")
 
     run_with_tools(
-        client=backend,
-        model="read_test",
         messages=[{"role": "user", "content": "Please read test.txt."}],
         loaded_tools=tools,
         backend_tools=backend.convert_tools(tools),
-        options={},
-        keep_alive=None,
-        show_thinking=False,
-        no_safety_system_prompt=True,
-        verbose=1,
+        config=RunConfig(
+            client=backend,
+            model="read_test",
+            options={},
+            keep_alive=None,
+            show_thinking=False,
+            no_safety_system_prompt=True,
+            verbose=1,
+        ),
     )
 
     out = capsys.readouterr()

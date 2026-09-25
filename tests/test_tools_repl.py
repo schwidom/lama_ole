@@ -28,6 +28,7 @@ from tool_base import (  # noqa: E402
     load_tools,
     peek_tools_of_module,
 )
+from tool_base.config import RunConfig  # noqa: E402
 
 MODULE_GOOD = """\
 from tool_base import tool
@@ -73,7 +74,7 @@ def fake_tools_dir():
 
 
 def make_state(tools_dir):
-    state = chat.ChatState(client=EchoMockBackend(), model="test")
+    state = chat.ChatState(config=RunConfig(client=EchoMockBackend(), model="test"))
     state.tools_dir = tools_dir
     return state
 
