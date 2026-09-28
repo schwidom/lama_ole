@@ -155,9 +155,21 @@ class OllamaBackend(LlmBackend):
 
     def list_models(self) -> List[ModelInfo]:
         resp = self._client.list()
+        # print( resp) # Model(model='cogito:8b', modified_at=datetime.datetime(2026, 9, 25, 19, 13, 50, 227227, tzinfo=TzInfo(+02:00)), digest='6ce3758704032df7dac036a41be48bf1a7c9b8bc07d7060964285ab9953807b4', size=4920739975, details=ModelDetails(parent_model='', format='gguf', family='llama', families=['llama'], parameter_size='8.0B', quantization_level='Q4_K_M'))
+        # assert( False)
+
+        def backend_specifics( m) :
+            backend_specific = m.details.__dict__
+            backend_specific.update( { "digest":m.digest } )
+            return backend_specific
+
         return [
-            ModelInfo(name=m.name, size=getattr(m, "size", None))
+            ModelInfo(name=m.model
+                , size=getattr(m, "size", None)
+                , backend_specific = backend_specifics( m)
+            )
             for m in resp.models
+
         ]
 
     def list_running(self) -> List[RunningModel]:

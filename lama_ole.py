@@ -377,7 +377,7 @@ def main():
     if args.list:
         print("available models:")
         for model in client.list_models():
-            print(model.name)
+            print(model)
 
     if args.ps:
         print("running models:")
