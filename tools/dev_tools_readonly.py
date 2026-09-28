@@ -12,6 +12,7 @@ from typing import Optional, Any, Dict
 
 from tool_base import tool
 from tools_security.validate_path import validate_path as _validate_path
+from tools_documentation.regex import regex_help
 
 
 _DANGEROUS_PATTERNS = [
@@ -107,8 +108,7 @@ def list_dir(path: str = ".") -> Dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": [str(e)]}
 
-
-@tool(description="Search for a regex pattern in files under a path")
+@tool(description = f"Search for a regex pattern in files under a path. {regex_help()} ")
 def grep(pattern: str, path: str = ".", include: str = "*", fixed = False) -> Dict[str, Any]:
     safety_error = _validate_path(path)
     if safety_error:
@@ -157,7 +157,7 @@ def grep(pattern: str, path: str = ".", include: str = "*", fixed = False) -> Di
 def grepF(pattern: str, path: str = ".", include: str = "*") -> Dict[str, Any]:
     return grep( pattern, path, include, fixed = True)
 
-@tool(description="Search for range based regex pattern in a file, both patterns must exist in that file. If pattern_from is None or not provided, the start of the file is meant. If pattern_to is None or not provided, the end of the file is meant.")
+@tool(description = f"Search for range based regex pattern in a file, both patterns must exist exactly 1 time in that file. If pattern_from is None or not provided, the start of the file is meant. If pattern_to is None or not provided, the end of the file is meant. {regex_help()}")
 def grep_range_based(pattern_from: str = None, pattern_to: str = None, path: str = ".", include: str = "*", fixed = False) -> Dict[str, Any]:
     safety_error = _validate_path(path)
     if safety_error:

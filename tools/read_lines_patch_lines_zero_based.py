@@ -8,6 +8,8 @@ import re
 import glob as glob_mod
 from tools_security.validate_path import validate_path as _validate_path
 
+from tools_documentation.regex import regex_help
+
 read_lines_tuple3 = None
 
 
@@ -39,7 +41,7 @@ Note:
 - `patch_lines0` must be called immediately after a successful `read_lines0` call for the same file; otherwise, it will fail.
 """
 
-@tool(description="Searches for a regex pattern in a file and returns zero-indexed line numbers and their content (format: 'line_number: content'). These indices can be used with the `read_lines0` tool.")
+@tool(description = f"Searches for a regex pattern in a file and returns zero-indexed line numbers and their content (format: 'line_number: content'). These indices can be used with the `read_lines0` tool. {regex_help()}")
 def grep0_from_file(pattern: str, path: str) -> str:
 
     safety_error = _validate_path(path)
