@@ -182,6 +182,30 @@ class TestArgparseIntegration:
         assert args.temperature == 0.7
         assert args.model == "qwen3:8b"
 
+    def test_sampling_options_env_flow_into_parser(self, env_patch, monkeypatch):
+        monkeypatch.setenv("LAMA_OLE_TOP_P", "0.9")
+        monkeypatch.setenv("LAMA_OLE_TOP_K", "40")
+        args = build_parser().parse_args([])
+        assert args.top_p == 0.9
+        assert args.top_k == 40
+
+    def test_sampling_options_unset_by_default(self, env_patch):
+        args = build_parser().parse_args([])
+        assert args.top_p is None
+        assert args.top_k is None
+
+    def test_invalid_top_p_falls_back_with_warning(self, env_patch, monkeypatch, capsys):
+        monkeypatch.setenv("LAMA_OLE_TOP_P", "banana")
+        args = build_parser().parse_args([])
+        assert args.top_p is None
+        assert "banana" in capsys.readouterr().err
+
+    def test_invalid_top_k_falls_back_with_warning(self, env_patch, monkeypatch, capsys):
+        monkeypatch.setenv("LAMA_OLE_TOP_K", "banana")
+        args = build_parser().parse_args([])
+        assert args.top_k is None
+        assert "banana" in capsys.readouterr().err
+
     def test_cli_overrides_env(self, env_patch, monkeypatch):
         monkeypatch.setenv("LAMA_OLE_CHAT", "true")
         monkeypatch.setenv("LAMA_OLE_MODEL", "qwen3:8b")

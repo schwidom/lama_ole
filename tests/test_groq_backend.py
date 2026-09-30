@@ -190,6 +190,39 @@ class TestGroqOptionsAndPayloads:
         assert captured_payload["max_completion_tokens"] == 100
         assert "max_tokens" not in captured_payload
 
+    def test_top_p_and_top_k_forwarded_to_openai_backend(self):
+        backend = create_backend("openai_compat", host="https://api.example.com", api_key="fake_key")
+        captured_payload = None
+
+        def fake_urlopen(req, timeout=None):
+            nonlocal captured_payload
+            captured_payload = json.loads(req.data.decode("utf-8"))
+            return _sse_raw('data: {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}')
+
+        with patch("backends.openai_compat_backend.urlopen", side_effect=fake_urlopen):
+            list(backend.chat(model="qwen3:8b", messages=[{"role": "user", "content": "hi"}], options={"top_p": 0.9, "top_k": 40}))
+
+        assert captured_payload is not None
+        assert captured_payload["top_p"] == 0.9
+        assert captured_payload["top_k"] == 40
+
+    def test_groq_top_p_forwarded_but_top_k_dropped(self):
+        backend = GroqBackend(host="https://api.groq.com/openai", api_key="fake_key")
+        captured_payload = None
+
+        def fake_urlopen(req, timeout=None):
+            nonlocal captured_payload
+            captured_payload = json.loads(req.data.decode("utf-8"))
+            return _sse_raw('data: {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}')
+
+        with patch("backends.groq_backend.urlopen", side_effect=fake_urlopen):
+            list(backend.chat(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": "hi"}], options={"top_p": 0.9, "top_k": 40}))
+
+        assert captured_payload is not None
+        # Groq maps top_p; it has no top_k concept so that key is dropped from the payload.
+        assert captured_payload["top_p"] == 0.9
+        assert "top_k" not in captured_payload
+
     def test_tool_use_enforces_parsed_reasoning(self):
         backend = GroqBackend(host="https://api.groq.com/openai", api_key="fake_key")
         captured_payload = None

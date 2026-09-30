@@ -150,6 +150,22 @@ PARAMETERS: List[ParameterSpec] = [
         help="Set the sampling temperature (e.g., 0.7)",
     ),
     ParameterSpec(
+        name="top_p",
+        flags=["--top_p"],
+        env_var="LAMA_OLE_TOP_P",
+        type=float,
+        default=None,
+        help="Constrained-sampling threshold: keep the smallest set of tokens whose cumulative probability reaches top_p (e.g., 0.9); unset to use the model's own value",
+    ),
+    ParameterSpec(
+        name="top_k",
+        flags=["--top_k"],
+        env_var="LAMA_OLE_TOP_K",
+        type=int,
+        default=None,
+        help="Constrained-sampling threshold: restrict sampling to the top k most probable tokens (e.g., 40); unset to use the model's own value",
+    ),
+    ParameterSpec(
         name="num_ctx",
         flags=["--num_ctx"],
         env_var="LAMA_OLE_NUM_CTX",

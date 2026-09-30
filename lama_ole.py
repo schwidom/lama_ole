@@ -555,6 +555,12 @@ def main():
         "temperature": args.temperature,
     }
 
+    if None != args.top_p:
+        options["top_p"] = args.top_p
+
+    if None != args.top_k:
+        options["top_k"] = args.top_k
+
     if None != args.num_ctx:
         options["num_ctx"] = args.num_ctx
 

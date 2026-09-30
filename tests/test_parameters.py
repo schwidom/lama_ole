@@ -37,6 +37,19 @@ def test_parse_cli_explicit_params():
     assert "conf" not in parsed
 
 
+def test_parse_cli_explicit_params_sampling_options():
+    argv = ["--top_p", "0.9", "--top_k", "40"]
+    parsed = parse_cli_explicit_params(argv)
+    assert parsed.get("top_p") == 0.9
+    assert parsed.get("top_k") == 40
+
+
+def test_parse_cli_explicit_params_sampling_options_with_equals():
+    parsed = parse_cli_explicit_params(["--top_p=0.75", "--top_k=20"])
+    assert parsed.get("top_p") == 0.75
+    assert parsed.get("top_k") == 20
+
+
 def test_parse_cli_explicit_params_store_true_long_flag():
     assert parse_cli_explicit_params(["--list"]) == {"list": True}
     assert parse_cli_explicit_params(["-l"]) == {"list": True}
@@ -102,6 +115,19 @@ def test_inspection_as_natural(capsys):
     captured = capsys.readouterr().out
     assert '--model "gemma4:26b"' in captured or '--model gemma4:26b' in captured
     assert "LAMA_OLE_NUM_CTX=100000" in captured
+
+
+def test_inspection_as_environment_sampling_options(capsys):
+    argv = ["--show", "s env", "--as-environment"]
+    initial_env = {"LAMA_OLE_TOP_P": "0.5", "LAMA_OLE_TOP_K": "30"}
+    config_dict = {}
+
+    res = process_inspection_flags(argv, config_dict, initial_env)
+    assert res is True
+
+    captured = capsys.readouterr().out
+    assert "export LAMA_OLE_TOP_P=0.5" in captured
+    assert "export LAMA_OLE_TOP_K=30" in captured
 
 
 def test_overwritten_comments(capsys):

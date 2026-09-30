@@ -39,8 +39,8 @@ lama_ole.py --host localhost -m gemma4:26b-a4b-it-qat --chat -t -v --tool tools.
 - **Media Understanding** — Image description/OCR, video frame analysis, audio
   transcription via bundled `tools.media_understanding_tools`.
 - **Model Listing** — List available or running models (`-l`, `--ps`).
-- **Ollama Options** — Pass through `temperature`, `num_ctx`, `num_gpu`,
-  `keep_alive`.
+- **Sampling Options** — Pass through `temperature`, `top_p`, `top_k` to control decoding.
+- **Ollama Options** — Pass through `num_ctx`, `num_gpu`, `keep_alive`.
 - **Model Transfer** — Copy models between ollama instances (`--transfer`).
   Supports localhost-to-remote and remote-to-remote via a built-in blob HTTP
   server (`--serve-blobs`).
@@ -629,6 +629,8 @@ to generate when you pressed Ctrl-C.
 | `-t, --thinking` | Show model's thought process | |
 | `--thoughtlog PATH` | Log thoughts to file (independent of `-t`) | |
 | `--temperature FLOAT` | Sampling temperature | `0.0` |
+| `--top_p FLOAT` | Constrained-sampling threshold (cumulative probability) | (backend default) |
+| `--top_k INT` | Constrained-sampling threshold (token count) | (backend default) |
 | `--num_ctx INT` | Context window size | (Ollama default) |
 | `--num_gpu INT` | GPU layers to use | (Ollama default) |
 | `--keep_alive DURATION` | Keep model in memory (`5m`, `1h`) | (Ollama default) |
@@ -866,6 +868,8 @@ the configured default.
 | `LAMA_OLE_HOST` | string | `--host` |
 | `LAMA_OLE_MODEL` | string | `-m, --model` |
 | `LAMA_OLE_TEMPERATURE` | number | `--temperature` |
+| `LAMA_OLE_TOP_P` | number | `--top_p` |
+| `LAMA_OLE_TOP_K` | integer | `--top_k` |
 | `LAMA_OLE_NUM_CTX` | integer | `--num_ctx` |
 | `LAMA_OLE_NUM_GPU` | integer | `--num_gpu` |
 | `LAMA_OLE_KEEP_ALIVE` | string | `--keep_alive` |
