@@ -156,7 +156,7 @@ def load_files(files):
                 'num': len(snippets) + 1,
                 'start': open_idx,
                 'end': close_idx,
-                'content': lines[open_idx + 1:close_idx],
+                'content': lines[open_idx:close_idx+1],
             })
         for u in unclosed:
             warnings.append(
@@ -182,33 +182,23 @@ def list_snippets(snippets, files_lines, verbose):
 
         # context before the opening fence (up to 5 lines)
         for idx in range(max(0, s['start'] - 5), s['start']):
-            print(lines[idx])
+            print('a' + lines[idx])
 
-        # # the fence + code content + closing fence
-        # print(lines[s['start']])
-        # for cline in s['content']:
-        #     print(cline)
-        # print(lines[s['end']])
+        # content contains the fence
 
-        # the fence
-        print(lines[s['start']])
-
-        if s['end'] - s['start'] -1 <= 5 + 5 : # space between the fences
+        if s['end'] - s['start'] -1 <= (5 + 5) : # space between the fences
             for cline in s['content']:
-                print(cline)
+                print('c'+cline)
         else :
-            for cline in s['content'][0:5]:
-                print(cline)
+            for cline in s['content'][0:6]:
+                print('d'+cline)
             print( '.....')
-            for cline in s['content'][-5:]:
-                print(cline)
-
-        # closing fence
-        print(lines[s['end']])
+            for cline in s['content'][-6:]:
+                print('e'+cline)
 
         # context after the closing fence (up to 5 lines)
         for idx in range(s['end'] + 1, min(len(lines), s['end'] + 1 + 5)):
-            print(lines[idx])
+            print('g'+lines[idx])
 
         print()  # blank separator between snippets
 
@@ -222,12 +212,10 @@ def select_snippets(snippets, indices, verbose, quote, indent):
 
         content = apply_indent(s['content'], indent)
         if quote:
-            print("```")
             for cline in content:
                 print(cline)
-            print("```")
         else:
-            for cline in content:
+            for cline in content[1:-1]:
                 print(cline)
             # keep multiple non-quoted snippets visually separated
             if pos != len(indices) - 1:
