@@ -47,7 +47,7 @@ class StateLogger:
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             prefix = f"\nTIME: {ts}\n"
             if marker:
-                prefix += f"[{marker}] "
+                prefix += f"[{marker}]\n"
             self._handle.write(prefix)
             self._slice_written = True
         self._handle.write(text)
