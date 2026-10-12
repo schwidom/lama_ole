@@ -182,23 +182,23 @@ def list_snippets(snippets, files_lines, verbose):
 
         # context before the opening fence (up to 5 lines)
         for idx in range(max(0, s['start'] - 5), s['start']):
-            print('a' + lines[idx])
+            print(lines[idx])
 
         # content contains the fence
 
         if s['end'] - s['start'] -1 <= (5 + 5) : # space between the fences
             for cline in s['content']:
-                print('c'+cline)
+                print(cline)
         else :
             for cline in s['content'][0:6]:
-                print('d'+cline)
+                print(cline)
             print( '.....')
             for cline in s['content'][-6:]:
-                print('e'+cline)
+                print(cline)
 
         # context after the closing fence (up to 5 lines)
         for idx in range(s['end'] + 1, min(len(lines), s['end'] + 1 + 5)):
-            print('g'+lines[idx])
+            print(lines[idx])
 
         print()  # blank separator between snippets
 
