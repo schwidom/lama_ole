@@ -561,6 +561,12 @@ def main():
     if None != args.top_k:
         options["top_k"] = args.top_k
 
+    if None != args.repeat_penalty:
+        options["repeat_penalty"] = args.repeat_penalty
+
+    if None != args.presence_penalty:
+        options["presence_penalty"] = args.presence_penalty
+
     if None != args.num_ctx:
         options["num_ctx"] = args.num_ctx
 

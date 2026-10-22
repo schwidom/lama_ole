@@ -39,7 +39,7 @@ lama_ole.py --host localhost -m gemma4:26b-a4b-it-qat --chat -t -v --tool tools.
 - **Media Understanding** — Image description/OCR, video frame analysis, audio
   transcription via bundled `tools.media_understanding_tools`.
 - **Model Listing** — List available or running models (`-l`, `--ps`).
-- **Sampling Options** — Pass through `temperature`, `top_p`, `top_k` to control decoding.
+- **Sampling Options** — Pass through `temperature`, `top_p`, `top_k`, `repeat_penalty`, `presence_penalty` to control decoding.
 - **Ollama Options** — Pass through `num_ctx`, `num_gpu`, `keep_alive`.
 - **Model Transfer** — Copy models between ollama instances (`--transfer`).
   Supports localhost-to-remote and remote-to-remote via a built-in blob HTTP
@@ -631,6 +631,8 @@ to generate when you pressed Ctrl-C.
 | `--temperature FLOAT` | Sampling temperature | `0.0` |
 | `--top_p FLOAT` | Constrained-sampling threshold (cumulative probability) | (backend default) |
 | `--top_k INT` | Constrained-sampling threshold (token count) | (backend default) |
+| `--repeat_penalty FLOAT` | Penalize repeat sequence of tokens | (backend default) |
+| `--presence_penalty FLOAT` | Penalize tokens based on their presence in the text so far | (backend default) |
 | `--num_ctx INT` | Context window size | (Ollama default) |
 | `--num_gpu INT` | GPU layers to use | (Ollama default) |
 | `--keep_alive DURATION` | Keep model in memory (`5m`, `1h`) | (Ollama default) |
@@ -870,6 +872,8 @@ the configured default.
 | `LAMA_OLE_TEMPERATURE` | number | `--temperature` |
 | `LAMA_OLE_TOP_P` | number | `--top_p` |
 | `LAMA_OLE_TOP_K` | integer | `--top_k` |
+| `LAMA_OLE_REPEAT_PENALTY` | number | `--repeat_penalty` |
+| `LAMA_OLE_PRESENCE_PENALTY` | number | `--presence_penalty` |
 | `LAMA_OLE_NUM_CTX` | integer | `--num_ctx` |
 | `LAMA_OLE_NUM_GPU` | integer | `--num_gpu` |
 | `LAMA_OLE_KEEP_ALIVE` | string | `--keep_alive` |

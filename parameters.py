@@ -166,6 +166,22 @@ PARAMETERS: List[ParameterSpec] = [
         help="Constrained-sampling threshold: restrict sampling to the top k most probable tokens (e.g., 40); unset to use the model's own value",
     ),
     ParameterSpec(
+        name="repeat_penalty",
+        flags=["--repeat_penalty"],
+        env_var="LAMA_OLE_REPEAT_PENALTY",
+        type=float,
+        default=None,
+        help="Penalize repeat sequence of tokens (e.g., 1.1); unset to use the model's own value",
+    ),
+    ParameterSpec(
+        name="presence_penalty",
+        flags=["--presence_penalty"],
+        env_var="LAMA_OLE_PRESENCE_PENALTY",
+        type=float,
+        default=None,
+        help="Present penalty for tokens based on their presence in the text so far (e.g., 0.5); unset to use the model's own value",
+    ),
+    ParameterSpec(
         name="num_ctx",
         flags=["--num_ctx"],
         env_var="LAMA_OLE_NUM_CTX",
