@@ -214,6 +214,9 @@ def grep_range_based(pattern_from: str = None, pattern_to: str = None, path: str
                 return {"status": "error", "message": ["Error: pattern_to matches 0 times :"]}
             (_, idx_to) = m2.span()
 
+        if idx_from > idx_to :
+            return {"status": "error", "message": ["pattern_from appears to be after pattern_to"]}
+
         return {"status": "success", "data": content[idx_from:idx_to]}
     except Exception as e:
         return {"status": "error", "message": [str(e)]}
