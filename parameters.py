@@ -443,6 +443,19 @@ PARAMETERS: List[ParameterSpec] = [
         action="store_true",
         help="Initialize the environment and enter interactive mode",
     ),
+    ParameterSpec(
+        name="load",
+        flags=["--load"],
+        env_var="LAMA_OLE_LOAD",
+        default=None,
+        help="Path to a session file to load (requires --chat)",
+    ),
+    ParameterSpec(
+        name="stats",
+        flags=["--stats"],
+        action="store_true",
+        help="Print statistics about a session file (requires --load or --resume)",
+    ),
     # --- Parameter inspection (--show <script> selector + --as-* output formats) ---
     ParameterSpec(
         name="show",

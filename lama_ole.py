@@ -277,6 +277,215 @@ def _default_sessions_dir():
     return base
 
 
+# ---------------------------------------------------------------------------
+# --stats helper functions
+# ---------------------------------------------------------------------------
+
+
+def _compute_stats(data: dict) -> str:
+    """Compute statistics from a loaded session file data dict.
+
+    Returns a human-readable string mirroring the /stats REPL command.
+    """
+    lines = []
+    lines.append("Session Statistics")
+    lines.append("==================")
+    lines.append("")
+
+    model = data.get("model")
+    lines.append("Model: {}".format(model if model else "(none)"))
+
+    messages = data.get("messages", [])
+    lines.append("Messages: {}".format(len(messages)))
+    lines.append("")
+
+    # Message breakdown by role at message level
+    role_counts = {}
+    tool_call_count = 0
+    thinking_count = 0
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant":
+            if msg.get("thinking") is not None:
+                thinking_count += 1
+            if msg.get("tool_calls"):
+                tool_call_count += 1
+            else:
+                role_counts["assistant"] = role_counts.get("assistant", 0) + 1
+        else:
+            role_counts[role] = role_counts.get(role, 0) + 1
+
+    lines.append("Message breakdown by role:")
+    for role in ("user", "assistant", "tool", "system"):
+        count = role_counts.get(role, 0)
+        lines.append("  {}: {}".format(role, count))
+    lines.append("  tool_calls: {}".format(tool_call_count))
+    lines.append("  thinking: {}".format(thinking_count))
+    lines.append("")
+
+    title = data.get("title") or "(untitled)"
+    lines.append("Title: {}".format(title))
+
+    session_id = data.get("session_id")
+    lines.append("Session ID: {}".format(session_id if session_id else "(none)"))
+
+    created_at = data.get("created_at")
+    if created_at:
+        lines.append("Created: {}".format(_format_timestamp(created_at)))
+    else:
+        lines.append("Created: (not set)")
+
+    updated_at = data.get("updated_at")
+    if updated_at:
+        lines.append("Updated: {}".format(_format_timestamp(updated_at)))
+    else:
+        lines.append("Updated: (not set)")
+
+    mode = data.get("mode")
+    lines.append("Mode: {}".format(mode if mode else "(build)"))
+
+    loaded_tools = data.get("loaded_tool_modules")
+    if loaded_tools:
+        lines.append("Loaded tools: {}".format(", ".join(loaded_tools)))
+    else:
+        lines.append("Loaded tools: (none)")
+
+    skill = data.get("skill")
+    lines.append("Skill: {}".format(skill if skill else "(none)"))
+
+    sys_prompt = data.get("system_prompt")
+    lines.append("System prompt: {}".format("set" if sys_prompt else "none"))
+
+    ctx_usage = data.get("ctx_usage")
+    ctx_usage_model = data.get("ctx_usage_model")
+    if ctx_usage and ctx_usage.get("prompt_eval_count"):
+        pe = ctx_usage["prompt_eval_count"]
+        ec = ctx_usage.get("eval_count", 0)
+        lines.append("Context usage: {}/{} tokens (model: {})".format(
+            pe, ec, ctx_usage_model or "(none)"))
+    else:
+        lines.append("Context usage: (not recorded)")
+
+    ctx_compact = data.get("ctx_compact")
+    ctx_threshold = data.get("ctx_compact_threshold")
+    ctx_model = data.get("ctx_compact_model")
+    compact_str = "disabled"
+    if ctx_compact:
+        compact_str = "enabled"
+        if ctx_threshold is not None:
+            compact_str += " (threshold: {:.0%})".format(ctx_threshold)
+        if ctx_model:
+            compact_str += ", model: {}".format(ctx_model)
+    lines.append("Context compaction: {}".format(compact_str))
+
+    cwd = data.get("cwd")
+    lines.append("CWD (from session): {}".format(cwd if cwd else "(not stored)"))
+    lines.append("Current working directory: {}".format(os.getcwd()))
+
+    return "\n".join(lines)
+
+
+def _format_timestamp(ts):
+    """Format a Unix timestamp to a human-readable string."""
+    import datetime
+    try:
+        dt = datetime.datetime.fromtimestamp(ts)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, OSError, TypeError):
+        return str(ts)
+
+
+def _handle_stats(args):
+    """Handle --stats: determine target file, validate, compute and print stats."""
+    # Determine target file
+    target_file = None
+    if args.load is not None:
+        target_file = args.load
+    elif args.resume:
+        sessions_dir = _default_sessions_dir()
+        result = find_recent_session(sessions_dir, os.getcwd())
+        if result is None:
+            print("Error: --stats requires --load or --resume, and no recent session was found.",
+                  file=sys.stderr)
+            sys.exit(1)
+        target_file = result[0]
+    else:
+        print("Error: --stats requires --load or --resume.", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate file existence
+    if not os.path.exists(target_file):
+        print("Error: file not found: {}".format(target_file), file=sys.stderr)
+        sys.exit(1)
+
+    # Read and parse file
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        print("Error: could not read file '{}': {}".format(target_file, e),
+              file=sys.stderr)
+        sys.exit(1)
+
+    if not content or content.strip() == "":
+        print("Error: the file is empty.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as e:
+        print("Error: invalid JSON in '{}': {}".format(target_file, e),
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Level 1 validation: must have 'messages' key
+    if "messages" not in data:
+        print("Error: the file does not contain a 'messages' key.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Check for no messages
+    messages = data.get("messages", [])
+    if not messages:
+        print("Error: the session has no messages.", file=sys.stderr)
+        sys.exit(1)
+
+    # Compute and print stats
+    stats_str = _compute_stats(data)
+    print(stats_str)
+    sys.exit(0)
+
+
+def _resolve_load_path(args, config_dict):
+    """Resolve effective load path from --load or LAMA_OLE_LOAD.
+
+    Returns (load_path, warning_message) tuple.
+    Warning message is set if --load overrides --resume.
+    """
+    # Precedence: --load CLI > LAMA_OLE_LOAD env > config
+    load_path = None
+    if args.load is not None:
+        load_path = args.load
+    else:
+        load_path = os.environ.get("LAMA_OLE_LOAD")
+        if not load_path:
+            # Check config dict
+            for key, value in config_dict.items():
+                if key == "LAMA_OLE_LOAD" and value:
+                    load_path = value
+                    break
+
+    if load_path is not None and not os.path.exists(load_path):
+        print("Error: file not found: {}".format(load_path), file=sys.stderr)
+        sys.exit(1)
+
+    warning = None
+    if load_path is not None and args.resume:
+        warning = "Warning: --load overrides --resume; --resume is ignored."
+
+    return load_path, warning
+
+
 def _prompt_model_choice(cli_model, session_model):
     """Ask the user which model to keep when CLI and session disagree.
 
@@ -298,6 +507,87 @@ def _prompt_model_choice(cli_model, session_model):
         if ans in ("a", "abort"):
             return "abort"
         print("Please answer s, c or a.", file=sys.stderr)
+
+
+def _load_session_into(state, path):
+    """Load a session from a file into ``state``.
+
+    Handles model mismatch prompt and session ID prompt.
+    Does NOT apply ctx_* settings (informational only).
+    """
+    if not os.path.exists(path):
+        print("Error: file not found: {}".format(path), file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        print("Error: could not read file '{}': {}".format(path, e),
+              file=sys.stderr)
+        sys.exit(1)
+
+    if not content or content.strip() == "":
+        print("Error: the file is empty.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as e:
+        print("Error: invalid JSON in '{}': {}".format(path, e),
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Level 1 validation: must have 'messages' key
+    if "messages" not in data:
+        print("Error: the file does not contain a 'messages' key.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    messages = data.get("messages", [])
+    if not messages:
+        print("Error: the session has no messages.", file=sys.stderr)
+        sys.exit(1)
+
+    # Model mismatch prompt
+    session_model = data.get("model")
+    cli_model = state.config.model
+    if cli_model and session_model and cli_model != session_model:
+        choice = _prompt_model_choice(cli_model, session_model)
+        if choice == "abort":
+            print("Aborted. Returning to chat.", file=sys.stderr)
+            return
+        if choice == "cli":
+            data["model"] = cli_model
+
+    # Session ID prompt
+    if data.get("session_id"):
+        title = data.get("title") or "(untitled)"
+        while True:
+            ans = input(
+                "The loaded session has session_id '{}' "
+                "(title: '{}').\n"
+                "Preserve this session ID or create a new one? [p/n]: ".format(
+                    data["session_id"], title
+                )
+            ).strip().lower()
+            if ans in ("p", "preserve", ""):
+                break
+            if ans in ("n", "new"):
+                data["session_id"] = new_session_id()
+                break
+            print("Please answer p or n.", file=sys.stderr)
+
+    # Apply session without ctx_* settings (informational only)
+    apply_session(state, data, source=path, skip_ctx_settings=True)
+    title = data.get("title") or "(untitled)"
+    n = len(state.messages)
+    print(
+        "Loaded session '{}' ({} messages) from {}.".format(
+            title, n, path
+        ),
+        file=sys.stderr,
+    )
 
 
 def _resume_session_into(state, resume):
@@ -339,6 +629,24 @@ def main():
 
     args = build_parser().parse_args()
     _resolve_env_defaults(args)
+
+    # -----------------------------------------------------------------------
+    # --stats: print session file statistics and exit (before any other work)
+    # -----------------------------------------------------------------------
+    if args.stats:
+        _handle_stats(args)
+
+    # -----------------------------------------------------------------------
+    # --load / LAMA_OLE_LOAD resolution
+    # -----------------------------------------------------------------------
+    load_path, load_warning = _resolve_load_path(args, config_dict)
+
+    if load_path is not None and not args.chat:
+        print("Error: --load requires --chat", file=sys.stderr)
+        sys.exit(1)
+
+    if load_warning:
+        print(load_warning, file=sys.stderr)
 
     color_util.configure(
         prompt=_env_str("LAMA_OLE_COLOR_PROMPT", None),
@@ -618,7 +926,10 @@ def main():
                 ctx_compact_threshold=args.auto_compact_threshold,
                 ctx_compact_model=args.auto_compact_model,
             )
-            if args.resume:
+            # Handle --load or --resume session source
+            if load_path is not None:
+                _load_session_into(state, load_path)
+            elif args.resume:
                 resume = find_recent_session(sessions_dir, os.getcwd())
                 if resume:
                     _resume_session_into(state, resume)

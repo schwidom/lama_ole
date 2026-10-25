@@ -1718,11 +1718,15 @@ def serialize_session(
     return data
 
 
-def apply_session(state: ChatState, data: dict, source: str = "session") -> None:
+def apply_session(state: ChatState, data: dict, source: str = "session", skip_ctx_settings: bool = False) -> None:
     """Restore conversation state from a serialized session dict.
 
     Shared by ``/load`` and session resume. Unknown or absent keys are
     ignored so old-format files and forward compatibility both work.
+
+    If ``skip_ctx_settings`` is True, ctx_compact / ctx_compact_threshold /
+    ctx_compact_model from the loaded file are NOT applied (informational
+    only).
     """
     state.messages = data.get("messages", [])
     if data.get("session_id"):
@@ -1782,13 +1786,13 @@ def apply_session(state: ChatState, data: dict, source: str = "session") -> None
         state.config.skill_text = data.get("skill_text")
     if "system_prompt" in data:
         state.config.system_prompt = data["system_prompt"]
-    if "ctx_compact" in data:
+    if "ctx_compact" in data and not skip_ctx_settings:
         state.ctx_compact = bool(data["ctx_compact"])
-    if "ctx_compact_threshold" in data:
+    if "ctx_compact_threshold" in data and not skip_ctx_settings:
         state.ctx_compact_threshold = sanitize_ctx_threshold(
             data["ctx_compact_threshold"], state.ctx_compact_threshold
         )
-    if "ctx_compact_model" in data:
+    if "ctx_compact_model" in data and not skip_ctx_settings:
         state.ctx_compact_model = data["ctx_compact_model"]
     _bind_mode_toggle(state)
 
@@ -1798,6 +1802,8 @@ def _cmd_save(path: str, state: ChatState):
         print("Usage: /save <path>")
         return
     data = serialize_session(state)
+    # Do NOT store cwd in manually saved files
+    data.pop("cwd", None)
     if os.path.exists(path):
         confirm = input(f"File '{path}' already exists. Overwrite? (y/n): ").lower()
         if confirm != 'y':
@@ -1810,6 +1816,29 @@ def _cmd_save(path: str, state: ChatState):
         print(f"Saved conversation with {len(state.messages)} messages to {path}")
     except Exception as e:
         print(f"Error saving conversation: {e}")
+
+
+def _prompt_model_choice_local(cli_model, session_model):
+    """Ask the user which model to keep when CLI and session disagree.
+
+    Returns one of "session", "cli", or "abort".
+    """
+    while True:
+        print(
+            f"The session uses model '{session_model}' but the CLI set "
+            f"'{cli_model}'.",
+            file=sys.stderr,
+        )
+        ans = input(
+            "Use the (s)ession model, the (c)li model, or (a)bort? [s/c/a]: "
+        ).strip().lower()
+        if ans in ("s", "session", ""):
+            return "session"
+        if ans in ("c", "cli"):
+            return "cli"
+        if ans in ("a", "abort"):
+            return "abort"
+        print("Please answer s, c or a.", file=sys.stderr)
 
 
 def _cmd_load(path: str, state: ChatState):
@@ -1825,6 +1854,36 @@ def _cmd_load(path: str, state: ChatState):
     except Exception as e:
         print(f"Error loading conversation: {e}")
         return
+
+    # Model mismatch prompt
+    session_model = data.get("model")
+    cli_model = state.config.model
+    if cli_model and session_model and cli_model != session_model:
+        choice = _prompt_model_choice_local(cli_model, session_model)
+        if choice == "abort":
+            print("Aborted. Returning to chat.", file=sys.stderr)
+            return
+        if choice == "cli":
+            data["model"] = cli_model
+
+    # Session ID prompt
+    if data.get("session_id"):
+        title = data.get("title") or "(untitled)"
+        while True:
+            ans = input(
+                "The loaded session has session_id '{}' "
+                "(title: '{}').\n"
+                "Preserve this session ID or create a new one? [p/n]: ".format(
+                    data["session_id"], title
+                )
+            ).strip().lower()
+            if ans in ("p", "preserve", ""):
+                break
+            if ans in ("n", "new"):
+                data["session_id"] = new_session_id()
+                break
+            print("Please answer p or n.", file=sys.stderr)
+
     if _has_conversation(state) and autosave_session(state):
         print("Previous conversation archived; use /resume to restore it.")
     apply_session(state, data, source=path)

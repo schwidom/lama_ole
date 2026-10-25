@@ -386,7 +386,7 @@ In chat mode (`--chat`), lines starting with `/` are commands:
 | `/plan` | Switch to plan mode (write tools blocked until `/build`) |
 | `/build` | Switch to build mode (full tools, changes allowed) |
 | `/save <path>` | Save the conversation to a JSON file (model, messages, active skill, system prompt and loaded toolsets) |
-| `/load <path>` | Load a conversation from a JSON file (restores the active skill, system prompt and re-loads toolsets) |
+| `/load <path>` | Load a conversation from a JSON file (restores the active skill, system prompt and re-loads toolsets); prompts for model mismatch and session ID preservation |
 | `/resume [match]` | Resume a saved session; without an argument it lists sessions and prompts, with a session-id or title substring it loads directly |
 | `/sessions` | List all saved sessions |
 | `/stats` | Show the current model, the last turn's per-round breakdown (time, tokens, tok/s), and session averages per model |
@@ -609,6 +609,90 @@ for the next turn. Only a tool call that was interrupted while still running
 (and its partial results) is dropped, along with whatever the model had started
 to generate when you pressed Ctrl-C.
 
+## Session Loading (`--load`)
+
+lama_ole can load a saved session file directly from the command line using
+`--load`. This requires `--chat` and overrides `--resume` if both are set.
+
+```bash
+python3 lama_ole.py --chat --load ~/.local/share/lama_ole/sessions/home-me-proj-abc123/12345.json
+```
+
+### Precedence
+
+`--load` CLI flag > `LAMA_OLE_LOAD` env var > `lama_ole.env` config > `--resume`
+
+When both `--load` and `--resume` are set, `--load` takes precedence and a
+warning is printed:
+
+```
+Warning: --load overrides --resume; --resume is ignored.
+```
+
+### Behavior
+
+- **Requires `--chat`** — `--load` without `--chat` exits with an error.
+- **Model mismatch** — If the loaded session's model differs from `--model`,
+  you are prompted to keep the CLI model, keep the session model, or abort.
+  (No prompt for `--resume`.)
+- **Session ID** — If the loaded file has a `session_id`, you are prompted to
+  preserve it or create a new one (default: new). Shows the session title.
+  (No prompt for `--resume`.)
+- **CWD** — The `cwd` stored in the session file is ignored; autosave always
+  uses the current working directory.
+- **Tools** — Session tool modules are **not** loaded; only `--tool` CLI flags
+  and `/tools` REPL commands matter.
+- **Context compaction settings** — `ctx_compact`, `ctx_compact_threshold`,
+  and `ctx_compact_model` from the session file are **not** applied; kept
+  for informational purposes only.
+- **Cross-backend** — Works with session files from any backend.
+
+### `LAMA_OLE_LOAD` Environment Variable
+
+Set `LAMA_OLE_LOAD` to a file path to achieve the same effect as `--load`.
+It can also be set in `lama_ole.env` config files.
+
+```bash
+LAMA_OLE_LOAD=~/.local/share/lama_ole/sessions/home-me-proj-abc123/12345.json
+python3 lama_ole.py --chat
+```
+
+## Session Statistics (`--stats`)
+
+Print statistical information about a session file and exit. Works standalone
+(no `--chat` required).
+
+```bash
+python3 lama_ole.py --stats ~/.local/share/lama_ole/sessions/home-me-proj-abc123/12345.json
+```
+
+### Requirements
+
+- Requires `--load` (to specify the target file) or `--resume` (to inspect the
+  recent session that `--resume` would load).
+- `--load` takes precedence over `--resume` if both are set.
+
+### Output
+
+Prints a human-readable report including:
+
+- Model, number of messages, and breakdown by role (user, assistant, tool calls,
+  thinking, tool, system)
+- Title, session ID, created/updated timestamps
+- Mode (`build`/`plan`), loaded tool modules, skill, system prompt presence
+- Context usage stats and compaction settings (informational)
+- CWD from session file and current working directory
+
+### Error Handling
+
+| Condition | Error |
+|-----------|-------|
+| No `--load` or `--resume` | `Error: --stats requires --load or --resume.` |
+| File not found | `Error: file not found: <path>` |
+| Invalid JSON | `Error: invalid JSON in <path>: <reason>` |
+| Empty file | `Error: the file is empty.` |
+| No messages | `Error: the session has no messages.` |
+
 ## Configuration Options
 
 | Flag | Description | Default |
@@ -637,6 +721,8 @@ to generate when you pressed Ctrl-C.
 | `--num_gpu INT` | GPU layers to use | (Ollama default) |
 | `--keep_alive DURATION` | Keep model in memory (`5m`, `1h`) | (Ollama default) |
 | `--chat` | Start interactive chat REPL | |
+| `--load PATH` | Load a session file (requires `--chat`) | |
+| `--stats PATH` | Print statistics about a session file (requires `--load` or `--resume`) | |
 | `--resume` / `--no-resume` | Auto-resume the most recent session for the current directory on startup | `--resume` |
 | `--autosave` / `--no-autosave` | Auto-save the chat session after every turn and on exit | `--autosave` |
 | `--tool MODULE` | Load tool module (repeatable) | |
@@ -878,6 +964,7 @@ the configured default.
 | `LAMA_OLE_NUM_GPU` | integer | `--num_gpu` |
 | `LAMA_OLE_KEEP_ALIVE` | string | `--keep_alive` |
 | `LAMA_OLE_CHAT` | boolean | `--chat` / `--no-chat` |
+| `LAMA_OLE_LOAD` | string | `--load` |
 | `LAMA_OLE_THINKING` | boolean | `-t, --thinking` / `--no-thinking` |
 | `LAMA_OLE_SAFE` | boolean | `--safe` / `--no-safe` |
 | `LAMA_OLE_MODE` | string | `--mode` (`build` or `plan`) |
@@ -895,13 +982,13 @@ the configured default.
 | `LAMA_OLE_MAX_TOOL_ROUNDS_CONTINUATION` | string | `--max_tool_rounds_continuation` |
 | `LAMA_OLE_SYSTEM_PROMPT` | string | `--system_prompt` |
 | `LAMA_OLE_SYSTEM_PROMPT_FILE` | string | `--system_prompt_file` |
- | `LAMA_OLE_COLOR_PROMPT` | color spec | (config-only, no flag) |
- | `LAMA_OLE_COLOR_THINKING` | color spec | (config-only, no flag) |
- | `LAMA_OLE_COLOR_OUTPUT` | color spec | (config-only, no flag) |
- | `LAMA_OLE_COLOR_INPUT` | color spec | (config-only, no flag) |
- | `LAMA_OLE_COLOR_METER_LOW` | color spec | (config-only, no flag) |
- | `LAMA_OLE_COLOR_METER_MID` | color spec | (config-only, no flag) |
- | `LAMA_OLE_COLOR_METER_HIGH` | color spec | (config-only, no flag) |
+| `LAMA_OLE_COLOR_PROMPT` | color spec | (config-only, no flag) |
+| `LAMA_OLE_COLOR_THINKING` | color spec | (config-only, no flag) |
+| `LAMA_OLE_COLOR_OUTPUT` | color spec | (config-only, no flag) |
+| `LAMA_OLE_COLOR_INPUT` | color spec | (config-only, no flag) |
+| `LAMA_OLE_COLOR_METER_LOW` | color spec | (config-only, no flag) |
+| `LAMA_OLE_COLOR_METER_MID` | color spec | (config-only, no flag) |
+| `LAMA_OLE_COLOR_METER_HIGH` | color spec | (config-only, no flag) |
 
 The `LAMA_OLE_COLOR_*` variables customize the ANSI colors used for the chat
 prompt, your typed input, the thinking stream, the LLM output, and the context
