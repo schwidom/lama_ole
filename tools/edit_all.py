@@ -55,7 +55,7 @@ def _trim_diff(diff: str) -> str:
 
 @tool(description="Returns a description of this module.")
 def edit_all_help():
-    return """Tools for editing files with multiple matches."""
+    return {"status": "success", "data": "Tools for editing files with multiple matches."}
     
 
 @tool(description="""Replaces all occurences of the 'search' string with the 'replace' string in the file at 'path'. The 'search' string must match at least once in the file.""")

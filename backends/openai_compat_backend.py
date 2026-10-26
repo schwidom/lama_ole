@@ -132,6 +132,7 @@ class OpenAICompatBackend(LlmBackend):
         """
         clean: List[Dict] = []
         pending_ids: List[str] = []
+        pending_idx: int = 0
         system_parts: List[str] = []
 
         for m in messages:
@@ -173,8 +174,9 @@ class OpenAICompatBackend(LlmBackend):
                         )
                     msg["tool_calls"] = calls
             elif role == "tool":
-                if pending_ids:
-                    msg["tool_call_id"] = m.get("tool_call_id") or pending_ids.pop(0)
+                if pending_idx < len(pending_ids):
+                    msg["tool_call_id"] = m.get("tool_call_id") or pending_ids[pending_idx]
+                    pending_idx += 1
                 else:
                     msg["tool_call_id"] = m.get("tool_call_id", "call_unknown")
                 msg["content"] = m.get("content", "")

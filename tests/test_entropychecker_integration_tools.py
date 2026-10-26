@@ -133,8 +133,9 @@ class TestExampleToolsEntropy:
             path = f.name
         try:
             result = example_read_file(path)
-            assert isinstance(result, str)
-            assert "plain text" in result
+            assert isinstance(result, dict)
+            assert result["status"] == "success"
+            assert "plain text" in result["data"]
         finally:
             os.unlink(path)
 

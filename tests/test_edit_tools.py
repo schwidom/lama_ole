@@ -16,7 +16,8 @@ from tools_security.validate_path import register_basepath
 
 register_basepath("/tmp")
 
-from tools.edit import edit, edit_range_based, create_new_file, makedirs
+from tools.edit import edit, edit_range_based, create_new_file, makedirs, edit_help
+from tools.edit_all import edit_all_help
 
 
 @contextlib.contextmanager
@@ -184,6 +185,16 @@ class TestEditTool(unittest.TestCase):
         """Empty/whitespace paths must be refused, not crash."""
         self.assertEqual(makedirs("")["status"], "error")
         self.assertEqual(makedirs("   ")["status"], "error")
+
+    def test_edit_help_returns_dict(self):
+        result = edit_help()
+        self.assertEqual(result["status"], "success")
+        self.assertIn("data", result)
+
+    def test_edit_all_help_returns_dict(self):
+        result = edit_all_help()
+        self.assertEqual(result["status"], "success")
+        self.assertIn("data", result)
 # 
 #     def test_edit_error_zero_matches(self):
 #         """Test error when the search string is not found."""

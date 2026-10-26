@@ -14,8 +14,53 @@ def get_weather(city: str) -> str:
 
 @tool(description="Calculate a mathematical expression")
 def calculate(expression: str) -> str:
+    import ast
+    import operator
+
     allowed = {"abs": abs, "min": min, "max": max, "sum": sum}
-    result = eval(expression, {"__builtins__": {}}, allowed)
+
+    # Safe evaluation using ast to avoid arbitrary code execution.
+    node = ast.parse(expression, mode="eval").body
+
+    def _eval(n):
+        if isinstance(n, ast.Expression):
+            return _eval(n.body)
+        if isinstance(n, ast.Constant):
+            if isinstance(n.value, (int, float)):
+                return n.value
+            raise ValueError("Unsupported constant")
+        if isinstance(n, ast.Num):  # py3.7 compat
+            return n.n
+        if isinstance(n, ast.BinOp):
+            left = _eval(n.left)
+            right = _eval(n.right)
+            ops = {
+                ast.Add: operator.add,
+                ast.Sub: operator.sub,
+                ast.Mult: operator.mul,
+                ast.Div: operator.truediv,
+                ast.FloorDiv: operator.floordiv,
+                ast.Mod: operator.mod,
+                ast.Pow: operator.pow,
+            }
+            if type(n.op) not in ops:
+                raise ValueError("Unsupported operator")
+            return ops[type(n.op)](left, right)
+        if isinstance(n, ast.UnaryOp):
+            operand = _eval(n.operand)
+            if isinstance(n.op, ast.USub):
+                return -operand
+            if isinstance(n.op, ast.UAdd):
+                return +operand
+            raise ValueError("Unsupported unary operator")
+        if isinstance(n, ast.Call):
+            if not isinstance(n.func, ast.Name) or n.func.id not in allowed:
+                raise ValueError("Unsupported function")
+            args = [_eval(a) for a in n.args]
+            return allowed[n.func.id](*args)
+        raise ValueError("Unsupported expression")
+
+    result = _eval(node)
     return str(result)
 
 
@@ -38,4 +83,4 @@ def read_file(path: str) -> str:
             "message": [f"File rejected by entropy check: {result.reason}"],
         }
 
-    return raw_content.decode("utf-8", errors="replace")
+    return {"status": "success", "data": raw_content.decode("utf-8", errors="replace")}

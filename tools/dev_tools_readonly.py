@@ -109,7 +109,7 @@ def list_dir(path: str = ".") -> Dict[str, Any]:
         return {"status": "error", "message": [str(e)]}
 
 @tool(description = f"Search for a regex pattern in files under a path. {regex_help()} ")
-def grep(pattern: str, path: str = ".", include: str = "*", fixed = False) -> Dict[str, Any]:
+def grep(pattern: str, path: str = ".", include: str = "*", fixed: bool = False) -> Dict[str, Any]:
     safety_error = _validate_path(path)
     if safety_error:
         return {"status": "error", "message": [safety_error]}
@@ -124,9 +124,8 @@ def grep(pattern: str, path: str = ".", include: str = "*", fixed = False) -> Di
             files_to_search = [path]
         elif os.path.isdir(path):
             files_to_search = []
-            for root, _, files in os.walk(path):
-                if any( [ x in DIRECTORIES_TO_AVOID for x in root.split('/')]):
-                    continue
+            for root, dirs, files in os.walk(path):
+                dirs[:] = [d for d in dirs if d not in DIRECTORIES_TO_AVOID]
                 for fname in files:
                     if glob_mod.fnmatch.fnmatch(fname, include):
                         files_to_search.append(os.path.join(root, fname))
@@ -158,7 +157,7 @@ def grepF(pattern: str, path: str = ".", include: str = "*") -> Dict[str, Any]:
     return grep( pattern, path, include, fixed = True)
 
 @tool(description = f"Search for range based regex pattern in a file, both patterns must exist exactly 1 time in that file. If pattern_from is None or not provided, the start of the file is meant. If pattern_to is None or not provided, the end of the file is meant. {regex_help()}")
-def grep_range_based(pattern_from: str = None, pattern_to: str = None, path: str = ".", include: str = "*", fixed = False) -> Dict[str, Any]:
+def grep_range_based(pattern_from: str = None, pattern_to: str = None, path: str = ".", include: str = "*", fixed: bool = False) -> Dict[str, Any]:
     safety_error = _validate_path(path)
     if safety_error:
         return {"status": "error", "message": [safety_error]}
