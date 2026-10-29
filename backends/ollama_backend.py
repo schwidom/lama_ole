@@ -205,5 +205,31 @@ class OllamaBackend(LlmBackend):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def embed(self, texts: List[str], model: str) -> List[List[float]]:
+        # Try the newer /api/embed endpoint first (batched).
+        try:
+            resp = self._client.embed(model=model, input=texts)
+            embs = getattr(resp, "embeddings", None)
+            if embs is None and isinstance(resp, dict):
+                embs = resp.get("embeddings")
+            if embs is not None:
+                return [list(e) for e in embs]
+        except Exception:
+            pass
+        # Fallback to the older /api/embeddings endpoint (one prompt at a time).
+        result: List[List[float]] = []
+        for t in texts:
+            try:
+                resp = self._client.embeddings(model=model, prompt=t)
+            except Exception as e:
+                raise RuntimeError(f"ollama embed failed: {e}") from None
+            emb = getattr(resp, "embedding", None)
+            if emb is None and isinstance(resp, dict):
+                emb = resp.get("embedding")
+            if emb is None:
+                raise RuntimeError("ollama embed returned no embedding")
+            result.append(list(emb))
+        return result
+
     def close(self) -> None:
         pass

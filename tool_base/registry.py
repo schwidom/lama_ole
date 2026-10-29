@@ -53,6 +53,18 @@ def load_tools(module_name: str) -> List[Tool]:
             tools=list(tools),
             env_vars=dict(env_vars),
         ))
+    # Collect __tool_params__ and register into parameters.PARAMETERS
+    tool_params = getattr(mod, "__tool_params__", None)
+    if tool_params:
+        try:
+            import parameters
+            existing_names = {p.name for p in parameters.PARAMETERS}
+            for p in tool_params:
+                if p.name not in existing_names:
+                    parameters.PARAMETERS.append(p)
+                    existing_names.add(p.name)
+        except Exception:
+            pass
     return tools
 
 

@@ -370,6 +370,11 @@ class GroqBackend(LlmBackend):
                 return info
         return None
 
+    def embed(self, texts: List[str], model: str) -> List[List[float]]:
+        raise NotImplementedError(
+            "Groq does not provide an embeddings endpoint."
+        )
+
     def stop_model(self, model: str) -> bool:
         return True
 

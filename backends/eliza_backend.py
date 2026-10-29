@@ -87,5 +87,21 @@ class ElizaBackend(LlmBackend):
     def show_model(self, model: str) -> Optional[ModelInfo]:
         return ModelInfo(name=model, context_length=4096)
 
+    def embed(self, texts: List[str], model: str) -> List[List[float]]:
+        # Deterministic pseudo-embedder for tests/offline use (same as echo).
+        import hashlib
+        import math
+        dim = 64
+        out: List[List[float]] = []
+        for t in texts:
+            h = hashlib.sha256(t.encode("utf-8")).digest()
+            vec = [0.0] * dim
+            for i in range(dim):
+                byte = h[i % len(h)]
+                vec[i] = (byte / 255.0) * 2.0 - 1.0
+            norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+            out.append([v / norm for v in vec])
+        return out
+
     def stop_model(self, model: str) -> bool:
         return True

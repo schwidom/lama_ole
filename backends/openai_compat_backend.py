@@ -319,6 +319,33 @@ class OpenAICompatBackend(LlmBackend):
                 return info
         return None
 
+    def embed(self, texts: List[str], model: str) -> List[List[float]]:
+        payload = {"model": model, "input": texts}
+        req = Request(
+            self._base_url + "/v1/embeddings",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._headers(),
+        )
+        try:
+            with urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except HTTPError as e:
+            body = e.read().decode("utf-8", "replace")[:1000]
+            raise RuntimeError(f"openai_compat embed failed ({e.code}): {body}") from None
+        except URLError as e:
+            raise RuntimeError(f"openai_compat embed failed: {e.reason}") from None
+        out: List[List[float]] = []
+        for item in (data.get("data") or []):
+            emb = item.get("embedding")
+            if emb is None:
+                raise RuntimeError("openai_compat embed returned no embedding")
+            out.append(list(emb))
+        if len(out) != len(texts):
+            raise RuntimeError(
+                f"openai_compat embed returned {len(out)} embeddings for {len(texts)} inputs"
+            )
+        return out
+
     def stop_model(self, model: str) -> bool:
         return True
 

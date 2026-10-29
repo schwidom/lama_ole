@@ -82,6 +82,17 @@ class LlmBackend(ABC):
     def convert_tools(self, tools: List[Any]) -> Optional[List[Dict]]:
         ...
 
+    def embed(self, texts: List[str], model: str) -> List[List[float]]:
+        """Embed a list of texts into vectors.
+
+        Returns a list of float vectors (one per input text). Raises
+        NotImplementedError (or a RuntimeError) when the backend does not
+        support embeddings.
+        """
+        raise NotImplementedError(
+            f"Embeddings are not supported by the {self.name} backend."
+        )
+
     def transfer_model(self, model: str, source: Any, dest: Any) -> bool:
         raise NotImplementedError(
             f"Model transfer is not supported by the {self.name} backend."

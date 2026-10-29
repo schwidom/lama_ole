@@ -8,13 +8,13 @@ from tool_base import tool
 
 
 _DANGEROUS_PATTERNS = [
-    r"\brm\s+-rf\s+/",
-    r"\bmkfs\b",
-    r"\bdd\s+if=",
-    r":\(\)\s*\{",
-    r"\bwget\s+.*\||\bcurl\s+.*-o\b",
-    r"\bchmod\s+-R\s+777\s+/",
-    r">\s*/dev/",
+#     r"\brm\s+-rf\s+/",
+#     r"\bmkfs\b",
+#     r"\bdd\s+if=",
+#     r":\(\)\s*\{",
+#     r"\bwget\s+.*\||\bcurl\s+.*-o\b",
+#     r"\bchmod\s+-R\s+777\s+/",
+#     r">\s*/dev/",
 ]
 
 

@@ -627,7 +627,88 @@ def main():
     if process_inspection_flags(sys.argv[1:], config_dict, initial_env):
         sys.exit(0)
 
-    args = build_parser().parse_args()
+    # -----------------------------------------------------------------------
+    # Segmented argv parsing (dynamic tool params): tool-contributed flags
+    # (--docsearch/--docscan/--docdb/...) must appear AFTER the --tool that
+    # provides them. Pre-load modules named via LAMA_OLE_TOOL env so their
+    # params are available from the start.
+    # -----------------------------------------------------------------------
+    _env_tools = _env_list("LAMA_OLE_TOOL") or []
+    for _m in _env_tools:
+        try:
+            load_tools(_m)
+        except Exception as _e:
+            print(f"Error loading tool module '{_m}': {_e}", file=sys.stderr)
+            sys.exit(1)
+
+    def _split_argv_by_tool(_argv):
+        _segs = []
+        _cur = []
+        _i = 0
+        _n = len(_argv)
+        while _i < _n:
+            if _argv[_i] == "--tool" and _i + 1 < _n:
+                _segs.append((_cur, _argv[_i + 1]))
+                _cur = []
+                _i += 2
+                continue
+            _cur.append(_argv[_i])
+            _i += 1
+        _segs.append((_cur, None))
+        return _segs
+
+    def _flags_in_segment(_seg_tokens, _spec):
+        _tset = set(_seg_tokens)
+        for _f in _spec.flags:
+            if _f in _tset:
+                return True
+        for _tok in _seg_tokens:
+            if "=" in _tok and _tok.split("=", 1)[0] in _spec.flags:
+                return True
+        if _spec.action == argparse.BooleanOptionalAction:
+            for _f in _spec.flags:
+                if _f.startswith("--") and ("--no-" + _f[2:]) in _tset:
+                    return True
+        return False
+
+    _segments = _split_argv_by_tool(sys.argv[1:])
+    _cli_tool_modules = []
+    _merged = None
+    for _seg_tokens, _next_tool in _segments:
+        _parser = build_parser()
+        try:
+            _seg_ns = _parser.parse_args(_seg_tokens)
+        except SystemExit:
+            raise
+        if _merged is None:
+            _merged = _seg_ns
+        else:
+            for _spec in PARAMETERS:
+                if _flags_in_segment(_seg_tokens, _spec):
+                    _attr = _spec.dest or _spec.name
+                    try:
+                        setattr(_merged, _attr, getattr(_seg_ns, _attr))
+                    except Exception:
+                        pass
+        if _next_tool is not None:
+            _cli_tool_modules.append(_next_tool)
+            try:
+                load_tools(_next_tool)
+            except Exception as _e:
+                print(f"Error loading tool module '{_next_tool}': {_e}", file=sys.stderr)
+                sys.exit(1)
+
+    if _merged is None:
+        _merged = build_parser().parse_args([])
+    args = _merged
+    # carry the dynamically loaded tool module names so _resolve_env_defaults merges them
+    if not getattr(args, "tools", None):
+        args.tools = _cli_tool_modules if _cli_tool_modules else None
+    else:
+        # append cli modules not already present
+        for _m in _cli_tool_modules:
+            if _m not in args.tools:
+                args.tools.append(_m)
     _resolve_env_defaults(args)
 
     # -----------------------------------------------------------------------
@@ -739,6 +820,26 @@ def main():
                 print(f"Error loading tool module '{module_name}': {e}", file=sys.stderr)
                 sys.exit(1)
     backend_tools = client.convert_tools(loaded_tools)
+
+    # One-shot doc search / doc scan mode
+    if getattr(args, "docsearch", None) or getattr(args, "docscan", None):
+        loaded_names = [m.module_name for m in get_tool_modules_info()]
+        if "tools.doc_search_tools" not in loaded_names and "doc_search_tools" not in loaded_names:
+            print("doc_search_tools not loaded; add --tool tools.doc_search_tools (or set LAMA_OLE_TOOL=tools.doc_search_tools)", file=sys.stderr)
+            sys.exit(1)
+        from doc_search.search import search as _ds_search, index_path as _ds_index
+        import json as _json
+        db_root = getattr(args, "docdb", None)
+        if db_root is None:
+            db_root = os.environ.get("LAMA_OLE_DOCSEARCH_DB") or "./docsearch"
+        if getattr(args, "docscan", None):
+            res = _ds_index(args.docscan, db_root=db_root)
+            print(_json.dumps(res, separators=(",", ":")))
+            sys.exit(0 if res.get("status") == "success" else 1)
+        if getattr(args, "docsearch", None):
+            res = _ds_search(args.docsearch, db_root=db_root)
+            print(_json.dumps(res, separators=(",", ":")))
+            sys.exit(0 if res.get("status") == "success" else 1)
 
     if args.debug:
         import code
