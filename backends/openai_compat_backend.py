@@ -35,6 +35,7 @@ _OPTION_MAP = {
     "presence_penalty": "presence_penalty",
     "reasoning_effort": "reasoning_effort",
     "preserve_thinking": "preserve_thinking",
+    "chat_template_kwargs": "chat_template_kwargs",
 }
 
 _EXTRA_MESSAGE_KEYS = (
@@ -147,6 +148,16 @@ class OpenAICompatBackend(LlmBackend):
 
             if role == "assistant":
                 msg["content"] = m.get("content")
+                # Replay prior reasoning in the structured channel when present,
+                # so Beam's allow_missing_thinking=false serving mode does not
+                # raise. Never re-inject as text tags.
+                thinking_val = m.get("thinking")
+                if thinking_val is None:
+                    thinking_val = m.get("reasoning_content")
+                if thinking_val is None:
+                    thinking_val = m.get("reasoning")
+                if thinking_val is not None and "reasoning_content" not in msg:
+                    msg["reasoning_content"] = thinking_val
                 raw_tcs = m.get("tool_calls")
                 if raw_tcs:
                     calls = []
@@ -186,7 +197,11 @@ class OpenAICompatBackend(LlmBackend):
                 else:
                     msg["tool_call_id"] = m.get("tool_call_id", "call_unknown")
                 msg["content"] = m.get("content", "")
-            elif role == "system":
+                # Help the template resolve the tool recipient.
+                tool_name = m.get("tool_name") or m.get("name")
+                if tool_name:
+                    msg["name"] = tool_name
+            elif role in ("system", "developer"):
                 system_parts.append(m.get("content", ""))
                 continue
             elif role == "user":
@@ -229,6 +244,20 @@ class OpenAICompatBackend(LlmBackend):
             target = _OPTION_MAP.get(key)
             if target and value is not None:
                 mapped[target] = value
+        # Beam's reasoning_effort is a chat-template kwarg on some servers; make
+        # sure it reaches apply_chat_template even when only the kwarg form is
+        # honoured. Gate on model name to avoid sending unsupported fields.
+        if "beam" in model.lower():
+            ctk = mapped.get("chat_template_kwargs")
+            if not isinstance(ctk, dict):
+                ctk = {}
+            else:
+                ctk = dict(ctk)
+            re_val = mapped.get("reasoning_effort")
+            if re_val is not None and "reasoning_effort" not in ctk:
+                ctk["reasoning_effort"] = re_val
+            if ctk:
+                mapped["chat_template_kwargs"] = ctk
         if mapped:
             payload.update(mapped)
 
@@ -342,6 +371,13 @@ class OpenAICompatBackend(LlmBackend):
 
     def convert_tools(self, tools: List[Any]) -> Optional[List[Dict]]:
         return convert_tools_to_openai(tools)
+
+    def extract_text_tool_calls(self, text: str):
+        # First run the default Qwen3-style parser as a fallback.
+        from tool_base.engine import _extract_text_tool_calls as _engine_extract
+
+        remaining, calls = _engine_extract(text)
+        # Beam XML grammar: 
 
     def list_models(self) -> List[ModelInfo]:
         resp = self._get_json("/v1/models")
