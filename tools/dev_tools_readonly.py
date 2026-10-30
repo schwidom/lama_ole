@@ -127,6 +127,8 @@ def grep(pattern: str, path: str = ".", include: str = "*", fixed: bool = False)
             for root, dirs, files in os.walk(path):
                 dirs[:] = [d for d in dirs if d not in DIRECTORIES_TO_AVOID]
                 for fname in files:
+                    if fname.endswith( ".sqlite"):
+                        continue
                     if glob_mod.fnmatch.fnmatch(fname, include):
                         files_to_search.append(os.path.join(root, fname))
         else:

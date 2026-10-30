@@ -33,6 +33,8 @@ _OPTION_MAP = {
     "seed": "seed",
     "frequency_penalty": "frequency_penalty",
     "presence_penalty": "presence_penalty",
+    "reasoning_effort": "reasoning_effort",
+    "preserve_thinking": "preserve_thinking",
 }
 
 _EXTRA_MESSAGE_KEYS = (
@@ -98,6 +100,10 @@ class OpenAICompatBackend(LlmBackend):
     @property
     def supports_keep_alive(self) -> bool:
         return False
+
+    @property
+    def supports_thinking(self) -> bool:
+        return True
 
     # ------------------------------------------------------------------
     # HTTP plumbing
@@ -212,6 +218,12 @@ class OpenAICompatBackend(LlmBackend):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+            # Negotiate parsed reasoning so servers that need an explicit opt-in
+            # stream reasoning in a dedicated field instead of raw tags.
+            if "gpt-oss" in model.lower():
+                payload["include_reasoning"] = True
+            else:
+                payload["reasoning_format"] = "parsed"
         mapped: Dict[str, Any] = {}
         for key, value in (options or {}).items():
             target = _OPTION_MAP.get(key)
@@ -250,11 +262,46 @@ class OpenAICompatBackend(LlmBackend):
                 delta = choice.get("delta") or choice.get("message") or {}
 
                 content = delta.get("content")
-                reasoning = delta.get("reasoning_content")
-                if content:
-                    yield ChatChunk(content=content, done=False)
+                reasoning = (
+                    delta.get("reasoning")
+                    or delta.get("reasoning_content")
+                    or delta.get("reasoning_text")
+                    or delta.get("thinking")
+                )
+
+                # Yield thinking first so the engine's state machine enters
+                # THINKING before any OUTPUTTING transition for this event.
                 if reasoning:
                     yield ChatChunk(thinking=reasoning, done=False)
+
+                if content:
+                    # Servers without a reasoning parser may embed reasoning
+                    # inline inside content as <​think>…<​/think> (or
+                    # <thought>…</thought>, or Qwen3 native tokens). Split those
+                    # out so they are classified as thinking, not output.
+                    in_think = False
+                    # normalize a few delimiter spellings to the canonical pair
+                    text = content
+                    text = text.replace("<thought>", "<​think>").replace("</thought>", "<​/think>")
+                    text = text.replace("<​|begin_of_thought|>", "<​think>").replace("<​|end_of_thought|>", "<​/think>")
+                    if "<​think>" in text:
+                        in_think = True
+                        before, _, after = text.partition("<​think>")
+                        if before.strip():
+                            yield ChatChunk(content=before, done=False)
+                        text = after
+                    if in_think:
+                        if "<​/think>" in text:
+                            think_part, _, normal_part = text.partition("<​/think>")
+                            in_think = False
+                            if think_part:
+                                yield ChatChunk(thinking=think_part, done=False)
+                            if normal_part:
+                                yield ChatChunk(content=normal_part, done=False)
+                        else:
+                            yield ChatChunk(thinking=text, done=False)
+                    else:
+                        yield ChatChunk(content=text, done=False)
 
                 for tc in delta.get("tool_calls") or []:
                     idx = tc.get("index", 0)

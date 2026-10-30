@@ -50,6 +50,10 @@ class LlmBackend(ABC):
     def supports_keep_alive(self) -> bool:
         return False
 
+    @property
+    def supports_thinking(self) -> bool:
+        return False
+
     @abstractmethod
     def chat(
         self,
@@ -97,6 +101,21 @@ class LlmBackend(ABC):
         raise NotImplementedError(
             f"Model transfer is not supported by the {self.name} backend."
         )
+
+    def extract_text_tool_calls(self, text: str):
+        """Extract text-embedded tool calls from a streamed text block.
+
+        Returns ``(remaining, calls)`` where ``remaining`` is ``text`` with the
+        successfully parsed directives removed and ``calls`` is a list of
+        OpenAI-style tool-call dicts (``{"function": {"name": ..., "arguments": {...}}}``).
+
+        The default implementation handles the Qwen3-style ``call:name{...}``
+        grammar. Backends whose models use a different text grammar (e.g. Beam's
+        XML tool calls) override this to add their own parsing while keeping
+        the Qwen3 path as a fallback.
+        """
+        from tool_base.engine import _extract_text_tool_calls
+        return _extract_text_tool_calls(text)
 
     def close(self) -> None:
         pass

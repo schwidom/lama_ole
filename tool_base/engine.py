@@ -701,8 +701,21 @@ def run_with_tools(
         # Promote text-based tool calls (`call:name{...}`) to real structured
         # tool calls and scrub the directive out of the text that is stored
         # and re-injected as context, so it is never replayed as "thinking".
-        think_cleaned, calls_from_thinking = _extract_text_tool_calls(response_thinking)
-        content_cleaned, calls_from_content = _extract_text_tool_calls(response_content)
+        from tool_base.engine import _extract_text_tool_calls as _engine_extract
+        _extract = getattr(config.client, "extract_text_tool_calls", None)
+        if not callable(_extract):
+            _extract = _engine_extract
+        else:
+            # Validate that the backend method actually returns a 2-tuple;
+            # MagicMock / broken impls fall back to the engine default.
+            try:
+                _probe = _extract(response_thinking if response_thinking is not None else "")
+            except Exception:
+                _probe = None
+            if not (isinstance(_probe, tuple) and len(_probe) == 2):
+                _extract = _engine_extract
+        think_cleaned, calls_from_thinking = _extract(response_thinking)
+        content_cleaned, calls_from_content = _extract(response_content)
         if calls_from_thinking or calls_from_content:
             response_thinking = think_cleaned
             response_content = content_cleaned
