@@ -286,6 +286,7 @@ python3 lama_ole.py -m llama3.2:3b -i "Transcribe this recording" \
 | `tools.audio_tools` | Basic audio operations | audio format conversion |
 | `tools.read_base64` | Base64 decoding | decode base64 strings |
 | `tools.lsp_tools` | Language Server integration (code intelligence) | `lsp_start`, `lsp_open`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_completion`, `lsp_signature_help`, `lsp_document_symbols`, `lsp_workspace_symbols`, `lsp_diagnostics`, `lsp_status`, `lsp_stop` |
+| `tools.doc_search_tools` | Semantic + lexical documentation search | `doc_index`, `doc_search`, `doc_search_next_results`, `doc_search_status`, `doc_get_chunk`, `doc_index_status`, `doc_index_clear` |
 
 ## LSP Tools
 
@@ -322,6 +323,99 @@ export LAMA_OLE_LSP_SERVERS='{"python": "pyright-langserver --stdio", "rust": ["
 If a server crashes, the next query auto-restarts it once; a second crash in a
 row asks you to run `lsp_start` again. See `llm_blueprint/lsp_tools/` for the
 design docs.
+
+## Doc Search Tools
+
+The `tools.doc_search_tools` toolset gives the model semantic + lexical search
+over indexed documentation trees. It chunks text files, embeds them with a
+configurable embedding backend (default `nomic-embed-text` via Ollama), stores
+vectors in a per-model SQLite DB, and answers queries written in a small
+Lisp-like language. All tools are read-only; indexing writes only to a dedicated
+cache directory (`LAMA_OLE_DOCSEARCH_DB`, default `./docsearch`).
+
+Load it like any other toolset:
+
+```bash
+python3 lama_ole.py -m <model> --chat --tool tools.doc_search_tools
+```
+
+### One-shot CLI
+
+When the toolset is loaded, three static flags become available:
+
+```bash
+# Index a tree, then search it, in one run
+python3 lama_ole.py --tool tools.doc_search_tools \
+    --docscan ./docs --docsearch '(q "how to configure")' --docdb ./docsearch
+
+# Index only
+python3 lama_ole.py --tool tools.doc_search_tools --docscan ./docs
+
+# Search an existing index
+python3 lama_ole.py --tool tools.doc_search_tools --docsearch '(r "keep_alive")'
+```
+
+`--docdb PATH` overrides the DB root for that invocation (falls back to
+`LAMA_OLE_DOCSEARCH_DB`, then `./docsearch`).
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| `doc_index(path, [include], [exclude], [recursive], [force])` | Index (or re-index) documents under a path. Returns counts. |
+| `doc_search(query, [top_k], [max_chars])` | Search the index with a Lisp query or plain string. Returns located chunks. |
+| `doc_search_next_results([maxcount], [search_id])` | Next page of the last `doc_search`. |
+| `doc_search_status()` | State of the last search (query, total, cursor, search_id, has_more). |
+| `doc_get_chunk(chunk_id)` | Full text of a chunk by ID. |
+| `doc_index_status()` | Index statistics and staleness. |
+| `doc_index_clear([path])` | Clear the whole DB (path=None) or a subtree. |
+
+### Query language
+
+`doc_search` accepts a Lisp-like S-expression or a plain string (auto-wrapped as
+`(q "...")`):
+
+| Operator | Meaning |
+|----------|---------|
+| `(q "text")` | Vector (semantic) search. |
+| `(r "regex")` / `(ri "regex")` | Regex filter, case-sensitive / insensitive. |
+| `(rf "text")` / `(rfi "text")` | Fixed-literal filter. |
+| `(k "w1" "w2")` / `(kc "w1" "w2")` | Keyword filter (case-insensitive / sensitive, OR). |
+| `(and ...)`, `(or ...)`, `(not ...)` | Boolean composition. |
+
+Examples:
+
+```lisp
+(q "which file contains the docs about LSP?")
+(and (q "keep_alive config") (not (rf "deprecated")))
+(or (k "LSP") (r "language.*server"))
+```
+
+### Configuration (env vars)
+
+All `LAMA_OLE_DOCSEARCH_*` variables are configuration only. Key ones:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LAMA_OLE_DOCSEARCH_DB` | `./docsearch` | DB root directory (one DB per embedding model). |
+| `LAMA_OLE_DOCSEARCH_BACKEND` | `ollama` | Embedding backend. |
+| `LAMA_OLE_DOCSEARCH_MODEL` | `nomic-embed-text` | Embedding model name. |
+| `LAMA_OLE_DOCSEARCH_HOST` | (backend default) | Host endpoint. |
+| `LAMA_OLE_DOCSEARCH_API_KEY` | (none) | API key (no fallback to global key). |
+| `LAMA_OLE_DOCSEARCH_CHUNK_LINES` | `40` | Lines per chunk. |
+| `LAMA_OLE_DOCSEARCH_CHUNK_OVERLAP` | `8` | Overlap between chunks. |
+| `LAMA_OLE_DOCSEARCH_MAX_CHUNK_CHARS` | `2000` | Hard cap on chunk text. |
+| `LAMA_OLE_DOCSEARCH_TOP_K` | `8` | Default results returned. |
+| `LAMA_OLE_DOCSEARCH_MAX_RESULTS` | `20` | Hard cap per call. |
+| `LAMA_OLE_DOCSEARCH_SNIPPET_CHARS` | `600` | Max chars returned per snippet. |
+| `LAMA_OLE_DOCSEARCH_INCLUDE` | `*.md *.txt *.rst *.py *.json *.yaml *.yml *.toml *.cfg *.ini *.html` | Files to index. |
+| `LAMA_OLE_DOCSEARCH_EXCLUDE` | `.git __pycache__ node_modules` | Files/dirs to skip. |
+| `LAMA_OLE_DOCSEARCH_MAX_FILE_BYTES` | `2000000` | Skip files larger than this. |
+| `LAMA_OLE_DOCSEARCH_EMBED_BATCH` | `32` | Embedding batch size. |
+| `LAMA_OLE_DOCSEARCH_EMBED_TIMEOUT` | `60` | Embedding request timeout (s). |
+
+See `llm_blueprint/2026_10_26_16_doc_search_via__nomic_embed_text/001_proposal.md`
+for the full specification.
 
 ## Model Transfer
 

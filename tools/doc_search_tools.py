@@ -32,11 +32,29 @@ __tool_env__ = {
     "LAMA_OLE_DOCSEARCH_MAX_RESULTS": "Hard cap on results per call (default: 20)",
     "LAMA_OLE_DOCSEARCH_MIN_SCORE": "Minimum cosine similarity (soft, default: 0.25)",
     "LAMA_OLE_DOCSEARCH_SNIPPET_CHARS": "Max chars of chunk text returned (default: 600)",
-    "LAMA_OLE_DOCSEARCH_INCLUDE": "Glob of files to index (default: *)",
-    "LAMA_OLE_DOCSEARCH_EXCLUDE": "Glob of files/dirs to skip (default: empty)",
+    "LAMA_OLE_DOCSEARCH_INCLUDE": "Glob of files to index (default: *.md *.txt *.rst *.py *.json *.yaml *.yml *.toml *.cfg *.ini *.html)",
+    "LAMA_OLE_DOCSEARCH_EXCLUDE": "Glob of files/dirs to skip (default: .git __pycache__ node_modules)",
     "LAMA_OLE_DOCSEARCH_MAX_FILE_BYTES": "Skip files larger than this (default: 2000000)",
     "LAMA_OLE_DOCSEARCH_EMBED_BATCH": "Embedding batch size (default: 32)",
     "LAMA_OLE_DOCSEARCH_EMBED_TIMEOUT": "Embedding request timeout seconds (default: 60)",
+}
+
+__tool_env_defaults__ = {
+    "LAMA_OLE_DOCSEARCH_DB": "./docsearch",
+    "LAMA_OLE_DOCSEARCH_BACKEND": "ollama",
+    "LAMA_OLE_DOCSEARCH_MODEL": "nomic-embed-text",
+    "LAMA_OLE_DOCSEARCH_CHUNK_LINES": "40",
+    "LAMA_OLE_DOCSEARCH_CHUNK_OVERLAP": "8",
+    "LAMA_OLE_DOCSEARCH_MAX_CHUNK_CHARS": "2000",
+    "LAMA_OLE_DOCSEARCH_TOP_K": "8",
+    "LAMA_OLE_DOCSEARCH_MAX_RESULTS": "20",
+    "LAMA_OLE_DOCSEARCH_MIN_SCORE": "0.25",
+    "LAMA_OLE_DOCSEARCH_SNIPPET_CHARS": "600",
+    "LAMA_OLE_DOCSEARCH_INCLUDE": "*.md *.txt *.rst *.py *.json *.yaml *.yml *.toml *.cfg *.ini *.html",
+    "LAMA_OLE_DOCSEARCH_EXCLUDE": ".git __pycache__ node_modules",
+    "LAMA_OLE_DOCSEARCH_MAX_FILE_BYTES": "2000000",
+    "LAMA_OLE_DOCSEARCH_EMBED_BATCH": "32",
+    "LAMA_OLE_DOCSEARCH_EMBED_TIMEOUT": "60",
 }
 
 __tool_params__ = [
@@ -66,7 +84,16 @@ def _env_int(name, default):
         return default
 
 
-@tool(description="Index documents under a path for doc search. Returns counts.")
+@tool(description=(
+    "Index (or re-index) documents under a path for semantic + lexical doc search. "
+    "Walks the path, applies include/exclude globs, skips binary/high-entropy files, "
+    "chunks text into overlapping line windows, embeds via the configured backend, "
+    "and upserts into a per-model SQLite DB. "
+    "include=None resolves to LAMA_OLE_DOCSEARCH_INCLUDE (default *.md *.txt *.rst *.py *.json *.yaml *.yml *.toml *.cfg *.ini *.html). "
+    "recursive=False skips subdirectories. force=True rebuilds even on model/param mismatch. "
+    "Returns {path, files_indexed, chunks_indexed, files_skipped, errors, db_path}. "
+    "Invalidates cached search state on success."
+))
 def doc_index(path: str, include: str = None, exclude: str = "", recursive: bool = True, force: bool = False) -> Dict[str, Any]:
     global _cached_query, _cached_results, _cached_cursor, _cached_search_id
     safety_error = _validate_path(path)
@@ -85,7 +112,26 @@ def doc_index(path: str, include: str = None, exclude: str = "", recursive: bool
     return res
 
 
-@tool(description="Search indexed documentation using a lisp query or plain string. Returns located chunks.")
+@tool(description=(
+    "Search the indexed documentation using a Lisp query or plain string. Returns located chunks.\n"
+    "QUERY LANGUAGE (Lisp S-expressions; plain strings auto-wrapped as (q \"...\"):\n"
+    "  (q \"text\")        - semantic/vector search: embed text, cosine-rank chunks.\n"
+    "  (r \"regex\")       - regex filter (case-sensitive). (ri ...) case-insensitive.\n"
+    "  (rf \"text\")       - fixed literal filter (metacharacters escaped). (rfi ...) case-insensitive.\n"
+    "  (k \"w1\" \"w2\")     - keyword filter, case-insensitive OR of substrings. (kc ...) case-sensitive.\n"
+    "  (and e1 e2 ...)   - boolean AND (short-circuit; (and) -> true).\n"
+    "  (or e1 e2 ...)    - boolean OR (short-circuit; (or) -> false).\n"
+    "  (not e)           - boolean NOT (exactly one arg).\n"
+    "Operators only recognized in head position; bare tokens in arg position are strings.\n"
+    "String escapes: \\\" \\\\ \\n \\t \\r. Regex backslashes need double-escaping: (r \"\\\\d\").\n"
+    "Examples: (q \"how to configure\") ; (r \"keep_alive\") ; (and (q \"config\") (not (rf \"deprecated\"))) ; (or (k \"LSP\") (r \"language.*server\")).\n"
+    "Pure lexical (no q): sorted by path then line. Vector/hybrid: ranked by cosine, clamped to top_k.\n"
+    "top_k=None resolves to LAMA_OLE_DOCSEARCH_TOP_K (default 8), clamped [1, MAX_RESULTS].\n"
+    "max_chars clamped [100, LAMA_OLE_DOCSEARCH_MAX_CHUNK_CHARS] (default 2000); truncates snippet text.\n"
+    "Returns {mode, query, total_found, returned, index_stale, search_id, has_more, current_range, results[]}.\n"
+    "Each result: {chunk_id, path, line_start, line_end, score, below_threshold, matched_by, match_spans, text, full_length, truncated}.\n"
+    "Use doc_get_chunk(chunk_id) for full text after truncation. Use doc_search_next_results for pagination."
+))
 def doc_search(query: str, top_k: int = None, max_chars: int = 400) -> Dict[str, Any]:
     global _cached_query, _cached_results, _cached_cursor, _cached_search_id
     if not query or not str(query).strip():
@@ -118,7 +164,11 @@ def doc_search(query: str, top_k: int = None, max_chars: int = 400) -> Dict[str,
     return result
 
 
-@tool(description="Get the next page of results from the previous doc_search call.")
+@tool(description=(
+    "Get the next page of results from the previous doc_search call. "
+    "maxcount clamped [1, 10]. search_id validates staleness (errors on mismatch). "
+    "Errors if no active search. Returns {search_id, results[], returned, has_more}."
+))
 def doc_search_next_results(maxcount: int = 10, search_id: Optional[str] = None) -> Dict[str, Any]:
     global _cached_cursor
     if not _cached_results and _cached_query == "":
@@ -139,13 +189,20 @@ def doc_search_next_results(maxcount: int = 10, search_id: Optional[str] = None)
     }}
 
 
-@tool(description="Get the full text of a chunk by its chunk_id.")
+@tool(description=(
+    "Retrieve the full text of a chunk by its chunk_id (from doc_search results). "
+    "Returns {chunk_id, path, line_start, line_end, text, full_length}. "
+    "Use after a truncated snippet to expand. Chunk text capped at max_chunk_chars at index time."
+))
 def doc_get_chunk(chunk_id: str) -> Dict[str, Any]:
     from doc_search.search import get_chunk_text
     return get_chunk_text(chunk_id)
 
 
-@tool(description="Show state of the last doc_search (query, total, cursor, search_id).")
+@tool(description=(
+    "Show state of the last doc_search: {query, total, cursor, search_id, has_more}. "
+    "Use to check pagination progress."
+))
 def doc_search_status() -> Dict[str, Any]:
     global _cached_query, _cached_results, _cached_cursor, _cached_search_id
     return {"status": "success", "data": {
@@ -157,13 +214,20 @@ def doc_search_status() -> Dict[str, Any]:
     }}
 
 
-@tool(description="Show index status (file/chunk counts, model, staleness).")
+@tool(description=(
+    "Show index statistics and staleness: {exists, db_path, model, configured_model, model_match, "
+    "file_count, chunk_count, chunk_lines, chunk_overlap, max_chunk_chars, last_indexed_at, index_stale}. "
+    "No file contents. If no index: {exists: false, db_path}."
+))
 def doc_index_status() -> Dict[str, Any]:
     from doc_search.search import index_status
     return index_status()
 
 
-@tool(description="Clear the index (whole DB if path is None, else a subtree).")
+@tool(description=(
+    "Clear the index. path=None deletes the entire DB file + WAL/SHM sidecars ({deleted: true}). "
+    "path given removes that subtree's chunks/files ({files_removed}). Irreversible, no confirmation."
+))
 def doc_index_clear(path: Optional[str] = None) -> Dict[str, Any]:
     if path is not None:
         safety_error = _validate_path(path)

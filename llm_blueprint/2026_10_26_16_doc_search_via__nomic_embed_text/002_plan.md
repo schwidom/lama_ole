@@ -42,7 +42,11 @@ Implemented and working (end-to-end tested with the `echo` backend via
 
 ## What is Missing / Broken
 
-### B1 — One-shot CLI flags are not parseable (BLOCKER)
+> Status update: all blockers and feature gaps below have been implemented and
+> verified against the code in `lama_ole/`. The only item deliberately deferred
+> is **B13** (optional split of `search.py`), which is out of scope for v1.
+
+### B1 — One-shot CLI flags are not parseable (BLOCKER) ✅ DONE
 
 `lama_ole.py` builds the argparse parser from `PARAMETERS` *before* loading
 tools, so `--docsearch`/`--docscan`/`--docdb` are unknown unless the toolset
@@ -85,39 +89,39 @@ hash-based fake). Integration tests requiring a real embedding backend go in
 `tests/tests_docsearch/` (or `tests/tests_doc_search/`) and are gated by
 `LAMA_OLE_TEST_DOCSEARCH=1` per AGENTS.md.
 
-### B3 — `doc_search_status` tool missing
+### B3 — `doc_search_status` tool missing ✅ DONE
 
 Proposal tool surface includes `doc_search_status` (state of last search:
 query, total, cursor, search_id). Not implemented. Add it.
 
-### B4 — `recursive` ignored by `doc_index`
+### B4 — `recursive` ignored by `doc_index` ✅ DONE
 
 `doc_index(path, ..., recursive=True)` passes `recursive` to `index_path`,
 which never reads it; directories are always walked. Honor `recursive=False`
 (skip subdirectories).
 
-### B5 — `match_spans` not produced
+### B5 — `match_spans` not produced ✅ DONE
 
 Proposal output format includes `match_spans` (line offsets within the chunk)
 for lexical hits. Current results omit it. Add span computation for
 `r`/`k` matches.
 
-### B6 — `LAMA_OLE_DOCSEARCH_TOP_K` not consumed
+### B6 — `LAMA_OLE_DOCSEARCH_TOP_K` not consumed ✅ DONE
 
 Declared in `__tool_env__` but never read. `doc_search` should default `top_k`
 from this env var (resolve `None` → env → 8 at call time).
 
-### B7 — `max_chars` not clamped (F21)
+### B7 — `max_chars` not clamped (F21) ✅ DONE
 
 F21: clamp `max_chars` to `[100, LAMA_OLE_DOCSEARCH_MAX_CHUNK_CHARS]`. Not
 done.
 
-### B8 — `doc_index` does not invalidate cached search results
+### B8 — `doc_index` does not invalidate cached search results ✅ DONE
 
 Proposal: a new `doc_index` invalidates the cached result list. The tool
 currently does not touch `_cached_*`. Clear them on successful index.
 
-### B9 — Default include glob not per 002#14
+### B9 — Default include glob not per 002#14 ✅ DONE
 
 002#14 (confirmed) recommends default include
 `*.md *.txt *.rst *.py *.json *.yaml *.yml *.toml *.cfg *.ini *.html`. Current
@@ -125,18 +129,18 @@ default is `*` (indexes everything, including binaries that then get skipped).
 Align the default (env var default + tool default) with the recommendation,
 while keeping `*` overrideable.
 
-### B10 — Duplicated file reading / binary detection
+### B10 — Duplicated file reading / binary detection ✅ DONE
 
 `chunker.read_text_file`/`is_binary` exist but `index_path` re-implements
 reading + null-byte + entropy checks. Refactor `index_path` to use
 `read_text_file` (single source of truth). Keep counts identical.
 
-### B11 — `index_status` stale-check duplicate loop (cosmetic)
+### B11 — `index_status` stale-check duplicate loop (cosmetic) ✅ DONE
 
 `search()` runs the same filesystem stale-check loop twice. Remove the
 duplicate. (No behavior change.)
 
-### B12 — `001_proposal.md` is stale (F28) [REMAINING]
+### B12 — `001_proposal.md` is stale (F28) [REMAINING] ✅ DONE
 
 The proposal document still references old env var names and tool signatures.
 Updating it is a documentation task; the implementation follows the Q&A decisions.
@@ -152,7 +156,7 @@ per-model DB dirs, `doc_search_status`/`doc_get_chunk` tools.
 suggests `indexer.py` + `search.py`. Optional refactor for testability; not
 required for correctness. Defer to v2 unless tests demand it.
 
-### B14 — `doc_search` tool default `top_k` from env (B6) and `snippet_chars`
+### B14 — `doc_search` tool default `top_k` from env (B6) and `snippet_chars` ✅ DONE
 
 Already reads `LAMA_OLE_DOCSEARCH_SNIPPET_CHARS`. Ensure `TOP_K` is read when
 `top_k` is not explicitly passed (use `None` default + resolve).

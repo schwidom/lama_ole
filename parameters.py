@@ -758,7 +758,11 @@ def _output_inspection_group(
             winning_val = val_default
 
         if winning_tier is None:
-            continue
+            # Show parameters that are registered but have no value anywhere
+            # (e.g. tool-contributed flags like --docsearch/--docscan/--docdb)
+            # so they remain discoverable via --as-* inspection.
+            winning_tier = "unset"
+            winning_val = None
 
         if selector_script is not None and not interpret( attributes, selector_script) :
             continue
@@ -778,6 +782,34 @@ def _output_inspection_group(
 
         # Format output
         _print_formatted_param(spec, mode, winning_val, winning_tier, comment)
+
+    # Surface tool-contributed env vars (__tool_env__) from loaded tool modules.
+    try:
+        import tool_base
+        _mods = tool_base.get_tool_modules_info()
+    except Exception:
+        _mods = []
+    for _mod in _mods:
+        for _var, _desc in (_mod.env_vars or {}).items():
+            _val = initial_env.get(_var) if _var in initial_env else config_dict.get(_var)
+            _default = getattr(_mod, "env_defaults", {}).get(_var)
+            if _val is None and _default is not None:
+                _val = _default
+                _tier = "defaults"
+            else:
+                _tier = "environment" if _var in initial_env else ("config" if _var in config_dict else "unset")
+            if mode == "parameters":
+                continue
+            if mode == "environment":
+                if _val is not None:
+                    print('export %s="%s" # %s' % (_var, _val, _tier))
+                else:
+                    print("export %s= # unset" % _var)
+            elif mode == "natural":
+                if _val is not None:
+                    print("%s=%s # %s" % (_var, _val, _tier))
+                else:
+                    print("%s= # unset" % _var)
 
 
 def _print_formatted_param(spec: ParameterSpec, mode: str, val: Any, winning_tier: str, comment: str):
@@ -801,6 +833,8 @@ def _print_formatted_param(spec: ParameterSpec, mode: str, val: Any, winning_tie
         elif val is not None:
             qval = format_bash_c_quote(str(val))
             print(f"{primary_flag} {qval}{comment}")
+        elif winning_tier == "unset":
+            print(f"{primary_flag}  # unset{comment.replace(' # unset', '')}")
 
     elif mode == "environment":
         if spec.env_var:

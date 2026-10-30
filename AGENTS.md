@@ -53,6 +53,7 @@ lama_ole/
 │   └── run_all_tests.py     # Runs both frameworks (see "Running the Tests")
 └── tools/                   # Loadable tool modules (each is a Python module)
     ├── __init__.py
+    ├── doc_search_tools.py  # Doc search toolset (doc_index, doc_search, ...)
     ├── example_tools.py     # get_weather, calculate, read_file
     ├── media_understanding_tools.py  # image/video/audio via vision models + Whisper + OCR
     ├── dev_tools_readonly.py  # Restricted subsets of dev tools
@@ -76,7 +77,8 @@ lama_ole/
 | **`tool_base/`** | Core engine package. Defines `@tool` decorator that auto-infers JSON Schema from type annotations, registers tools in a registry (`registry.py`). `run_with_tools()` (`engine.py`) is the backend-agnostic main loop: consumes `ChatChunk` structs, prepends safety system prompt, streams chat responses, handles tool calls (invoke → wrap result with `[data from ...]` markers → feed back to model), supports safe-mode confirmation for dangerous tools. `loop_states.py` provides `ExecutionState`/`StateManager` for state tracking and robust Ctrl-C handling. `logging.py` provides the centralized `StateLogger` used for granular timestamps. |
 | **`chat.py`** | Interactive REPL (`ChatState`). Manages multi-turn conversation history, slash commands (`/feed`, `/new`, `/model`, `/backend`, `/save`, `/load`, `/tools` (load/unload/show toolsets), `/skill`, `/stats`, `/systemprompt`, `/context`, `/help`, `/exit`), and delegates each turn to `run_with_tools()`. |
 | **`lsp/`** | LSP integration engine. `jsonrpc.py` (`JsonRpcCodec`) does `Content-Length` framing with an incremental parser; `client.py` (`LspClient`) owns one server subprocess per session with an always-on `read1` reader thread, JSON-RPC requests/notifications, and crash detection; `registry.py` maps language ids to server commands (built-in table + `LAMA_OLE_LSP_SERVERS` env override — the LLM never supplies commands); `session.py` (`LspSessionManager`) keeps one client per language, re-syncs changed files (mtime/size) with didOpen/didChange, caches push diagnostics, auto-restarts a crashed server once per explicit start, and registers an `atexit` `stop_all`. |
-| **`tools/*.py`** | Tool modules. Each exports functions decorated with `@tool`. Tools can declare env vars via module-level `__tool_env__` dict (shown by `--help-tools`). |
+| **`tools/*.py`** | Tool modules. Each exports functions decorated with `@tool`. Tools can declare env vars via module-level `__tool_env__` dict (shown by `--help-tools`). Includes `tools.doc_search_tools` (Doc Search Toolset). |
+| **`doc_search/`** | Engine package for the Doc Search Toolset: chunker, SQLite vector store (per-model DB dirs), Lisp query parser, search/index engine. |
 
 ---
 

@@ -47,11 +47,13 @@ def load_tools(module_name: str) -> List[Tool]:
             obj.readonly = readonly
             tools.append(obj)
     env_vars = getattr(mod, "__tool_env__", {})
+    env_defaults = getattr(mod, "__tool_env_defaults__", {})
     if not any(m.module_name == module_name for m in _TOOL_MODULES):
         _TOOL_MODULES.append(ToolModuleInfo(
             module_name=module_name,
             tools=list(tools),
             env_vars=dict(env_vars),
+            env_defaults=dict(env_defaults),
         ))
     # Collect __tool_params__ and register into parameters.PARAMETERS
     tool_params = getattr(mod, "__tool_params__", None)

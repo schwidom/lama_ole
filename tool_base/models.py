@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 @dataclass
@@ -18,3 +18,4 @@ class ToolModuleInfo:
     module_name: str
     tools: list[Tool]
     env_vars: dict[str, str]
+    env_defaults: dict[str, str] = field(default_factory=dict)

@@ -624,22 +624,39 @@ def main():
 
     load_env_files()
 
+    # -----------------------------------------------------------------------
+    # Pre-load tool modules (from env and from --tool in argv) BEFORE
+    # inspection flags are processed, so tool-contributed params
+    # (--docsearch/--docscan/--docdb/...) are registered in PARAMETERS and
+    # visible to --as-natural / --as-parameters / --as-environment.
+    # -----------------------------------------------------------------------
+    _env_tools = _env_list("LAMA_OLE_TOOL") or []
+    _argv_tools = []
+    _i = 0
+    _argv = sys.argv[1:]
+    while _i < len(_argv):
+        if _argv[_i] == "--tool" and _i + 1 < len(_argv):
+            _argv_tools.append(_argv[_i + 1])
+            _i += 2
+            continue
+        _i += 1
+    for _m in _env_tools + _argv_tools:
+        if _m in (_env_tools + _argv_tools)[:(_env_tools + _argv_tools).index(_m)]:
+            continue
+        try:
+            load_tools(_m)
+        except Exception as _e:
+            print(f"Error loading tool module '{_m}': {_e}", file=sys.stderr)
+            sys.exit(1)
+
     if process_inspection_flags(sys.argv[1:], config_dict, initial_env):
         sys.exit(0)
 
     # -----------------------------------------------------------------------
     # Segmented argv parsing (dynamic tool params): tool-contributed flags
     # (--docsearch/--docscan/--docdb/...) must appear AFTER the --tool that
-    # provides them. Pre-load modules named via LAMA_OLE_TOOL env so their
-    # params are available from the start.
+    # provides them. Modules already loaded above; re-loading is idempotent.
     # -----------------------------------------------------------------------
-    _env_tools = _env_list("LAMA_OLE_TOOL") or []
-    for _m in _env_tools:
-        try:
-            load_tools(_m)
-        except Exception as _e:
-            print(f"Error loading tool module '{_m}': {_e}", file=sys.stderr)
-            sys.exit(1)
 
     def _split_argv_by_tool(_argv):
         _segs = []
@@ -835,7 +852,10 @@ def main():
         if getattr(args, "docscan", None):
             res = _ds_index(args.docscan, db_root=db_root)
             print(_json.dumps(res, separators=(",", ":")))
-            sys.exit(0 if res.get("status") == "success" else 1)
+            if res.get("status") != "success":
+                sys.exit(1)
+            if not getattr(args, "docsearch", None):
+                sys.exit(0)
         if getattr(args, "docsearch", None):
             res = _ds_search(args.docsearch, db_root=db_root)
             print(_json.dumps(res, separators=(",", ":")))

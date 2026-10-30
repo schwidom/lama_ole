@@ -242,6 +242,14 @@ def search(
                 "results": [],
             }}
 
+        # Resolve effective snippet length: max_chars overrides snippet_chars when given.
+        if max_chars is None:
+            _eff_snippet = snippet_chars
+        else:
+            _mc = _env_int("LAMA_OLE_DOCSEARCH_MAX_CHUNK_CHARS", 2000)
+            max_chars = max(100, min(max_chars, _mc))
+            _eff_snippet = max_chars
+
         # Embed query if vector present
         q_strings = _collect_q_strings(ast)
         query_embeddings = []
@@ -293,8 +301,8 @@ def search(
             # snippet truncation
             text = c["text"]
             truncated = False
-            if len(text) > snippet_chars:
-                text = text[:snippet_chars] + "..."
+            if len(text) > _eff_snippet:
+                text = text[:_eff_snippet] + "..."
                 truncated = True
 
             # match_spans for lexical hits

@@ -60,12 +60,13 @@ All functions decorated with `@tool(description=...)`. Module marked `__tool_rea
 
 | Tool | Purpose | Signature | Key Behavior |
 |---|---|---|---|
-| `doc_index` | Index (or re-index) documents under a path. | `doc_index(path: str, include: str = "*", exclude: str = "", recursive: bool = True, force: bool = False)` | Walks path, applies entropy/binary check, chunks text, embeds via backend, upserts to SQLite DB. Respects `force=True` to rebuild even on model/param mismatch. Returns counts (indexed, skipped). |
-| `doc_search` | Search the index using a Lisp query or plain string. | `doc_search(query: str, top_k: int = 8, max_chars: int = 400)` | Parses lisp → evaluates lexical filter → embeds query → cosine ranks candidates → returns top-k truncated snippets with locations. Mode derived from operators present (`q`→vector, `r/k`→lexical, both→hybrid). Plain strings auto-wrapped as `(q "...")`. |
-| `doc_search_next_results` | Next page of the last `doc_search`. | `doc_search_next_results(maxcount: int = 10, search_id: Optional[str] = None)` | Continues pagination over cached results. Validates `search_id` if provided (staleness detection). Errors if no active search or `search_id` mismatch. Returns next page with updated range and `has_more`. |
-| `doc_get_chunk` | Retrieve full text of a chunk by ID. | `doc_get_chunk(chunk_id: str)` | Looks up chunk in DB, returns full text capped at `max_chunk_chars`, plus location metadata (`path`, `line_start`, `line_end`). Used for targeted expansion after search truncation. |
-| `doc_index_status` | Show index statistics and staleness. | `doc_index_status()` | Returns doc count, chunk count, model name, last indexed timestamp, stale flag (if source files newer than index). No file contents returned. |
-| `doc_index_clear` | Clear the index (whole DB or subtree). | `doc_index_clear(path: Optional[str] = None)` | If `path` given: remove that subtree's chunks from DB. If `None`: delete entire DB file (`deleted: true` in response). Irreversible; no confirmation prompt. |
+| `doc_index` | Index (or re-index) documents under a path. | `doc_index(path: str, include: Optional[str] = None, exclude: str = "", recursive: bool = True, force: bool = False)` | Walks path, applies entropy/binary check, chunks text, embeds via backend, upserts to SQLite DB. `include=None` resolves to `LAMA_OLE_DOCSEARCH_INCLUDE` (default `*.md *.txt *.rst *.py *.json *.yaml *.yml *.toml *.cfg *.ini *.html`). Respects `force=True` to rebuild even on model/param mismatch. Returns counts (`files_indexed`, `chunks_indexed`, `files_skipped`, `errors`, `db_path`). |
+| `doc_search` | Search the index using a Lisp query or plain string. | `doc_search(query: str, top_k: Optional[int] = None, max_chars: int = 400)` | Parses lisp → evaluates lexical filter → embeds query → cosine ranks candidates → returns top-k truncated snippets with locations. `top_k=None` resolves to `LAMA_OLE_DOCSEARCH_TOP_K` (default 8), clamped to `[1, LAMA_OLE_DOCSEARCH_MAX_RESULTS]`. `max_chars` clamped to `[100, LAMA_OLE_DOCSEARCH_MAX_CHUNK_CHARS]`. Mode derived from operators present (`q`→vector, `r/k`→lexical, both→hybrid). Plain strings auto-wrapped as `(q "...")`. |
+| `doc_search_next_results` | Next page of the last `doc_search`. | `doc_search_next_results(maxcount: int = 10, search_id: Optional[str] = None)` | Continues pagination over cached results. `maxcount` clamped to `[1, 10]`. Validates `search_id` if provided (staleness detection). Errors if no active search or `search_id` mismatch. Returns next page with `has_more`. |
+| `doc_search_status` | Show state of the last `doc_search`. | `doc_search_status()` | Returns `query`, `total`, `cursor`, `search_id`, `has_more` for the most recent search. |
+| `doc_get_chunk` | Retrieve full text of a chunk by ID. | `doc_get_chunk(chunk_id: str)` | Looks up chunk in DB, returns full text (already capped at `max_chunk_chars` at index time), plus location metadata (`path`, `line_start`, `line_end`). Used for targeted expansion after search truncation. |
+| `doc_index_status` | Show index statistics and staleness. | `doc_index_status()` | Returns `exists`, `db_path`, `model`, `configured_model`, `model_match`, `file_count`, `chunk_count`, `chunk_lines`, `chunk_overlap`, `max_chunk_chars`, `last_indexed_at`, `index_stale`. No file contents returned. If no index exists, returns `exists: false` and `db_path`. |
+| `doc_index_clear` | Clear the index (whole DB or subtree). | `doc_index_clear(path: Optional[str] = None)` | If `path` given: remove that subtree's chunks/files from DB (`files_removed` in response). If `None`: delete entire DB file plus WAL/SHM sidecars (`deleted: true` in response; `deleted: false` if no index exists). Irreversible; no confirmation prompt. |
 
 ### Parameter Precedence
 
@@ -182,8 +183,8 @@ All `LAMA_OLE_DOCSEARCH_*` variables are **configuration only**. They do not tri
 
 | Variable | Default | Description |
 |---|---|---|
-| `LAMA_OLE_DOCSEARCH_INCLUDE` | `*.md *.txt *.rst *.py *.json *.yaml *.yml *.toml *.cfg *.ini *.html` | Glob patterns for files to index. |
-| `LAMA_OLE_DOCSEARCH_EXCLUDE` | `.git __pycache__ node_modules` | Glob patterns for directories/files to skip during walk. |
+| `LAMA_OLE_DOCSEARCH_INCLUDE` | `*.md *.txt *.rst *.py *.json *.yaml *.yml *.toml *.cfg *.ini *.html` | Glob patterns (space-separated) for files to index. Applied via `fnmatch` to basenames. |
+| `LAMA_OLE_DOCSEARCH_EXCLUDE` | `.git __pycache__ node_modules` | Glob patterns (space-separated) for directories/files to skip during walk. Directory names in `avoid_dirs` (`.git`, `__pycache__`, `node_modules`, `.docsearch`) are always pruned. |
 | `LAMA_OLE_DOCSEARCH_MAX_FILE_BYTES` | `2000000` (2 MB) | Skip files larger than this size; count them in status as skipped. |
 
 ### Embedding Backend Parameters
@@ -253,11 +254,11 @@ WAL mode is enabled for concurrent read safety. A busy timeout of 5 seconds is a
 ### Indexing (`doc_index`)
 
 1. **Validate path** via `tools_security.validate_path` (relative paths only unless basepath registered for tests).
-2. **Walk** the path (file or directory). Apply `include`/`exclude` globs and prune high-entropy/binary files using `EntropyChecker` + null-byte heuristic. Skip files above `max_file_bytes`.
-3. **Chunk** each text file into overlapping line windows: `chunk_lines` lines per chunk, `chunk_overlap` overlap. Each chunk records `{chunk_id, path, line_start, line_end, text}` with text hard-capped at `max_chunk_chars`.
+2. **Walk** the path (file or directory). `recursive=False` skips subdirectories. Apply `include`/`exclude` globs and prune high-entropy/binary files using `EntropyChecker` + null-byte heuristic (via `chunker.read_text_file`). Skip files above `max_file_bytes`.
+3. **Chunk** each text file into overlapping line windows: `chunk_lines` lines per chunk, `chunk_overlap` overlap. Each chunk records `{chunk_id, path, line_start, line_end, text}` with text hard-capped at `max_chunk_chars`. `chunk_id` format is `{path}\x1f{line_start}\x1f{line_end}` internally.
 4. **Embed** chunks in batches of `embed_batch` via `backend.embed(texts, model)`. Batch requests are sequential to keep memory bounded. Progress logged to stderr (not returned as tool data).
-5. **Upsert** to SQLite: by `(path, chunk_id)` for changed files; delete stale chunks for removed/renamed files. Version-stamp the index with model name + schema version.
-6. Return `{"status": "success", "data": {"indexed": N, "skipped_binary": N, "skipped_large": N}}`.
+5. **Upsert** to SQLite: by `(path, chunk_id)` for changed files; delete stale chunks for removed/renamed files. Unchanged files (same mtime + size, unless `force=True`) are skipped. Version-stamp the index with model name + schema version and chunking params.
+6. Return `{"status": "success", "data": {"path": ..., "files_indexed": N, "chunks_indexed": N, "files_skipped": N, "errors": [...], "db_path": ...}}`. `doc_index` also invalidates the cached search state on success.
 
 ### Search (`doc_search`)
 
@@ -266,8 +267,9 @@ WAL mode is enabled for concurrent read safety. A busy timeout of 5 seconds is a
    - Pure lexical (no `q`): evaluate `r`/`k` predicates; return matching chunks sorted by file path + line number.
    - Pure vector (only `q`): embed query, compute cosine similarity against all chunks, return top-k above threshold.
    - Hybrid (both `q` and lexical ops): apply lexical filter first to produce candidate set, then re-rank candidates by average cosine score of all `q` nodes in the expression. If no lexical candidates exist, fall back to pure vector search over all chunks.
-3. **Truncate** each returned chunk text to `snippet_chars` (default 600) with an ellipsis marker; report `full_length` and `truncated: true`. Include `below_threshold: true` flag for hits under `min_score`.
-4. Clamp `top_k` to `[1, max_results]`. Return standard result shape with `mode`, `total_found`, `current_range`, `has_more`, `search_id`, and `results` array.
+3. **Dedup** results by containment: a chunk whose line range is fully contained in an already-kept chunk of the same path is dropped.
+4. **Truncate** each returned chunk text to `snippet_chars` (default 600) with an ellipsis marker; report `full_length` and `truncated: true`. Include `below_threshold: true` flag for hits under `min_score`. `match_spans` (char offsets) are computed for lexical hits.
+5. Clamp `top_k` to `[1, max_results]`. `doc_search` fetches all results internally, caches them, and returns the first page. Return standard result shape with `mode`, `query`, `total_found`, `returned`, `index_stale`, `search_id`, `has_more`, `current_range`, and `results` array. `max_chars` (snippet length override) is clamped to `[100, LAMA_OLE_DOCSEARCH_MAX_CHUNK_CHARS]`.
 
 ### Pagination (`doc_search_next_results`)
 
@@ -301,6 +303,16 @@ When the `doc_search_tools` toolset is loaded (via `LAMA_OLE_TOOL=tools.doc_sear
 
 ### Flow Rules
 
+- If both `--docscan` and `--docsearch` are given: index first, then search in the same run.
+- If only `--docscan`: index and print status JSON, exit 0.
+- If only `--docsearch`: search and print results JSON, exit 0.
+- If neither flag is given: normal lama_ole chat mode proceeds as usual.
+- **No autoload**: If the toolset is not loaded, these flags are unrecognized by argparse. Error message directs user to add `--tool tools.doc_search_tools` (or set `LAMA_OLE_TOOL=tools.doc_search_tools`). No implicit module loading occurs.
+- One-shot mode runs after argument parsing and tool loading but before the chat loop. Backend is created; if backend creation fails, error JSON printed and process exits 1.
+- `--docdb` overrides the DB root for both scan and search in the same invocation.
+
+### Flow Rules
+
 - If both `--docscan` and `--docsearch` are given: index first, then search in the same run (convenient for "index then ask").
 - If only `--docscan`: index and print status JSON, exit 0.
 - If only `--docsearch`: search and print results JSON, exit 0.
@@ -318,7 +330,7 @@ Based on `006_plan.md` and `007_summary.md`, the implementation is **partially c
 |---|---|---|
 | **Backend extensions** | `backends/base.py`, `ollama_backend.py`, `openai_compat_backend.py`, `llamacpp_backend.py`, `groq_backend.py`, `echo_backend.py`, `eliza_backend.py` | `embed(texts, model)` abstract method added to `LlmBackend`; all backends implement or raise appropriately. Pseudo-embedders in echo/eliza for deterministic testing. |
 | **Engine package** | `doc_search/__init__.py`, `chunker.py`, `store.py`, `lisp.py`, `search.py` | All core modules created and written. Chunking, SQLite storage with per-model DB dirs, lisp parser, search + index engine all implemented. |
-| **Toolset** | `tools/doc_search_tools.py` | 7 tools (`doc_index`, `doc_search`, `doc_search_next_results`, `doc_get_chunk`, `doc_index_status`, `doc_index_clear`) with correct signatures, `__tool_env__` (17 env vars), and `__tool_params__` (3 CLI flags). Module marked `__tool_readonly__ = True`. |
+| **Toolset** | `tools/doc_search_tools.py` | 7 tools (`doc_index`, `doc_search`, `doc_search_next_results`, `doc_search_status`, `doc_get_chunk`, `doc_index_status`, `doc_index_clear`) with correct signatures, `__tool_env__` (17 env vars), and `__tool_params__` (3 CLI flags). Module marked `__tool_readonly__ = True`. |
 | **Parameter registration** | `tool_base/registry.py` | Modified to collect `__tool_params__` from loaded tool modules and register into `parameters.PARAMETERS` with deduplication. No circular imports. |
 | **One-shot mode** | `lama_ole.py` | Added one-shot handling for `--docsearch`, `--docscan`, `--docdb`. Backend created before execution; JSON output to stdout; exit 0/1 codes. |
 | **End-to-end testing** | — | Tested with `echo` backend (deterministic pseudo-embedder): indexing, vector search, regex filtering, status reporting, and staleness detection all verified. |
@@ -327,7 +339,6 @@ Based on `006_plan.md` and `007_summary.md`, the implementation is **partially c
 
 | Item | Priority | Description |
 |---|---|---|
-| Fix `index_status` in `search.py` | High | Remove leftover `len(stored_files)` reference; use proper `count_files` logic instead. |
 | Full test suite | Medium | Unit tests for chunker, store, lisp parser (deterministic fake embeddings); integration tests gated by `LAMA_OLE_TEST_DOCSEARCH=1` for real backends. |
 | Update `001_proposal.md` | Low | Marked as stale per F28; superseded by this consolidated spec (`009_proposal.md`). No code changes needed — documentation update only. |
 
